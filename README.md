@@ -1,0 +1,2 @@
+# OpenGeophysicalModelLibraryVisualizer
+Provides visualizations for OpenGeophysicalModelLibrary-java
