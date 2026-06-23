@@ -1,0 +1,3 @@
+[submodule "lib/OpenGeophysicalModelLibrary-java"]
+	path = lib/OpenGeophysicalModelLibrary-java
+	url = https://github.com/pbernalpolo/OpenGeophysicalModelLibrary-java.git
