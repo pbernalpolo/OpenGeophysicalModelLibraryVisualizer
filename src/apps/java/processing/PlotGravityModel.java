@@ -251,6 +251,12 @@ public class PlotGravityModel
 	private boolean meshGlobal;
 
 	/**
+	 * Whether the current mesh spans a full 360 degrees of longitude (whole sphere, or a saturated polar cap), so the
+	 * first and last grid columns are the same meridian. Normals must then wrap in longitude to avoid a seam.
+	 */
+	private boolean meshLonPeriodic;
+
+	/**
 	 * View parameters used to produce the current mesh (shared by both fields). The center longitude is kept so the
 	 * coastline lookup can wrap longitudes to the mesh window.
 	 */
@@ -415,8 +421,10 @@ public class PlotGravityModel
 			double halfLatSpan = visibleVerticalHalfSpanDegrees();
 			double cosLat = Math.max( Math.cos( Math.toRadians( this.centerLatitude ) ) , 0.05 );
 			double halfLonSpan = Math.min( 180.0 , visibleHorizontalHalfSpanDegrees() / cosLat );
-			latMin = constrainLatitude( this.centerLatitude - halfLatSpan );
-			latMax = constrainLatitude( this.centerLatitude + halfLatSpan );
+			// Clamp to the actual poles ( +/- 90 ), not +/- 89: the field values are well defined there (only the zonal
+			// terms survive), so the mesh should reach the pole instead of leaving a gap that exposes the backing sphere.
+			latMin = Math.max( -90.0 , this.centerLatitude - halfLatSpan );
+			latMax = Math.min(  90.0 , this.centerLatitude + halfLatSpan );
 			lonMin = this.centerLongitude - halfLonSpan;
 			lonMax = this.centerLongitude + halfLonSpan;
 		}
@@ -430,6 +438,9 @@ public class PlotGravityModel
 		this.meshCellLatDegrees = cellLatDegrees;
 		this.meshCellLonDegrees = cellLonDegrees;
 		this.meshCenterLongitude = ( lonMin + lonMax ) * 0.5;
+		// A full 360-degree longitude span (whole sphere, or a polar cap where the span saturates) is periodic: the first and
+		// last columns are the same meridian, so normals there must use wrapped neighbors to avoid a lighting seam.
+		this.meshLonPeriodic = ( lonMax - lonMin ) >= 360.0 - 1.0e-6;
 
 		// Adapt the evaluation degree to the angular size of the grid cells (Nyquist), capped at the loaded degree.
 		this.viewDegree = (int) Math.round( 180.0 / Math.max( cellLatDegrees , 1.0e-6 ) );
@@ -929,8 +940,17 @@ public class PlotGravityModel
 	{
 		int im = Math.max( 0 , i - 1 );
 		int ip = Math.min( GRID_N - 1 , i + 1 );
-		int jm = Math.max( 0 , j - 1 );
-		int jp = Math.min( GRID_N - 1 , j + 1 );
+		int jm;
+		int jp;
+		if( this.meshLonPeriodic ) {
+			// Column GRID_N-1 duplicates column 0, so wrap to the adjacent distinct meridian: the first and last columns
+			// then share the same two-sided neighbors and get identical normals (no seam at the antimeridian).
+			jm = ( j == 0 ) ? GRID_N - 2 : j - 1;
+			jp = ( j == GRID_N - 1 ) ? 1 : j + 1;
+		} else {
+			jm = Math.max( 0 , j - 1 );
+			jp = Math.min( GRID_N - 1 , j + 1 );
+		}
 
 		PVector dLatitude = new PVector(
 				field.x[ip][j] - field.x[im][j] ,
