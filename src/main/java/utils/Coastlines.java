@@ -10,6 +10,7 @@ import java.util.Collections;
 import java.util.List;
 
 import processing.core.PApplet;
+import processing.core.PGraphics;
 
 
 
@@ -138,21 +139,32 @@ public final class Coastlines
 	 */
 	public void draw( PApplet app )
 	{
+		this.draw( app.g );
+	}
+
+
+	/**
+	 * Draws the coastline line strips into a Processing graphics surface (for example, an off-screen buffer).
+	 *
+	 * @param g	graphics surface receiving the draw calls.
+	 */
+	public void draw( PGraphics g )
+	{
 		if( this.segments.isEmpty() ) {
 			return;
 		}
-		app.noFill();
-		app.stroke( 245 , 235 );
-		app.strokeWeight( 1.2f );
+		g.noFill();
+		g.stroke( 245 , 235 );
+		g.strokeWeight( 1.2f );
 		for( Segment segment : this.segments ) {
 			float[] x = segment.x();
 			float[] y = segment.y();
 			float[] z = segment.z();
-			app.beginShape();
+			g.beginShape();
 			for( int i=0; i<x.length; i++ ) {
-				app.vertex( x[i] , y[i] , z[i] );
+				g.vertex( x[i] , y[i] , z[i] );
 			}
-			app.endShape();
+			g.endShape();
 		}
 	}
 

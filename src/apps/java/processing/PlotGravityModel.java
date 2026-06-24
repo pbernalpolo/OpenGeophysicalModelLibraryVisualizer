@@ -6,36 +6,39 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 
 import geophysicalModelLibrary.Egm2008;
-import numericalLibrary.functions.PreNormalizedAssociatedLegendrePolynomialEvaluator;
+import numericalLibrary.functions.SphericalHarmonicsEvaluator;
 import utils.Coastlines;
 
 import processing.core.PApplet;
+import processing.core.PGraphics;
+import processing.core.PShape;
 import processing.core.PVector;
 import processing.event.MouseEvent;
 
 
 
 /**
- * Interactive 3D visualization of the EGM2008 gravity anomaly draped on a globe.
+ * Interactive 3D visualization of the EGM2008 model on two synchronized globes.
  * <p>
- * The gravity anomaly is computed from the spherical harmonic coefficients using the classical spherical
- * approximation, with the even zonal harmonics of the GRS80 reference ellipsoid removed:
- * <p>
- *   delta_g( theta , lambda ) = ( GM / a^2 ) sum_{l=2}^{L} ( l - 1 ) sum_{m=0}^{l} P_l^m( cos theta ) [ dC_l^m cos( m lambda ) + S_l^m sin( m lambda ) ]
- * <p>
+ * The left globe shows the gravity anomaly (in mGal) and the right globe shows the geoid undulation (in m), both computed
+ * from the spherical harmonic coefficients with the even zonal harmonics of the GRS80 reference ellipsoid removed:
+ * <ul>
+ * <li> anomaly:    delta_g = ( GM / a^2 ) sum_{l=2}^{L} ( l - 1 ) sum_{m=0}^{l} P_l^m( cos theta ) [ dC_l^m cos( m lambda ) + S_l^m sin( m lambda ) ]
+ * <li> undulation: N       = a           sum_{l=2}^{L}           sum_{m=0}^{l} P_l^m( cos theta ) [ dC_l^m cos( m lambda ) + S_l^m sin( m lambda ) ]
+ * </ul>
  * where  dC_l^m  is the model coefficient minus the reference ellipsoid coefficient (only the even zonal terms differ).
  * <p>
- * Interaction:
+ * Both globes share the same camera. Interaction:
  * <ul>
- * <li> Drag with the mouse (press-drag-release) to change the central latitude and longitude brought in front of the camera.
+ * <li> Drag with the mouse to change the central latitude and longitude brought in front of the camera.
  * <li> Mouse wheel to zoom in and out.
- * <li> Space bar to regenerate the colored mesh for the current view.
+ * <li> Space bar to regenerate both colored meshes for the current view.
  * </ul>
- * The colored mesh stays fixed while navigating and is regenerated only when requested. A fixed number of grid points is
+ * The meshes stay fixed while navigating and are regenerated only when requested. A fixed number of grid points is
  * evaluated in latitude and longitude; when regeneration is requested, the actual coordinates of those points cover the
  * currently visible spherical cap, so the resolution increases as the view zooms in. The spherical harmonic degree used
- * for the evaluation is adapted to the angular size of the grid cells (and capped at the loaded degree), keeping
- * zoomed-out views fast and zoomed-in views detailed.
+ * for the evaluation is adapted to the angular size of the grid cells (and capped at the loaded degree). Each globe is
+ * rendered into its own square off-screen buffer and composited side by side.
  */
 public class PlotGravityModel
 	extends PApplet
@@ -67,7 +70,13 @@ public class PlotGravityModel
 	private static final double CAMERA_FOV_DEGREES = 50.0;
 
 	/**
-	 * Stable symmetric color scale. Values outside this interval saturate, but colors no longer depend on the current view.
+	 * When the visible vertical half-span reaches this value (zoomed out far enough), the whole sphere is meshed instead of
+	 * only the visible cap, so the globe can then be rotated without regenerating.
+	 */
+	private static final double GLOBAL_MODE_HALF_SPAN_DEGREES = 60.0;
+
+	/**
+	 * Stable symmetric color scale for the gravity anomaly. Values outside this interval saturate.
 	 */
 	private static final double COLOR_LIMIT_MILLIGAL = 250.0;
 
@@ -77,7 +86,17 @@ public class PlotGravityModel
 	private static final double RELIEF_LIMIT_MILLIGAL = 250.0;
 
 	/**
-	 * Maximum signed radial relief, in world units, used to make small anomaly details easier to see.
+	 * Stable symmetric color scale for the geoid undulation. Values outside this interval saturate.
+	 */
+	private static final double COLOR_LIMIT_METERS = 100.0;
+
+	/**
+	 * Geoid undulation magnitude that reaches the full radial relief exaggeration.
+	 */
+	private static final double RELIEF_LIMIT_METERS = 100.0;
+
+	/**
+	 * Maximum signed radial relief, in world units, used to make small details easier to see.
 	 */
 	private static final float RELIEF_EXAGGERATION = 36.0f;
 
@@ -114,6 +133,8 @@ public class PlotGravityModel
 			"lib/OpenGeophysicalModelLibrary-java/res/EGM2008.gfc",
 	};
 
+
+
 	////////////////////////////////////////////////////////////////
 	/// MODEL AND EVALUATION STATE
 	////////////////////////////////////////////////////////////////
@@ -129,12 +150,12 @@ public class PlotGravityModel
 	private int modelMaxDegree;
 
 	/**
-	 * Evaluator of the orthonormal associated Legendre functions.
+	 * Evaluator of the orthonormal spherical harmonics. Its dirty-flag caching lets a whole latitude row reuse one Legendre pass.
 	 */
-	private PreNormalizedAssociatedLegendrePolynomialEvaluator legendre;
+	private SphericalHarmonicsEvaluator harmonics;
 
 	/**
-	 * Factor converting the orthonormal associated Legendre value of order  m  into the geodetic fully normalized one:
+	 * Factor converting the orthonormal spherical harmonic value of order  m  into the geodetic fully normalized one:
 	 * {@code (-1)^m sqrt( 4 pi ( 2 - delta_{m0} ) )}.
 	 */
 	private double[] geodeticFactor;
@@ -145,10 +166,9 @@ public class PlotGravityModel
 	private double[] ellipsoidZonal;
 
 	/**
-	 * Reused buffers for  cos( m lambda )  and  sin( m lambda ) .
+	 * Reused output of {@link #accumulateFieldSums(double)}: index 0 is the undulation sum, index 1 is the anomaly sum.
 	 */
-	private double[] cosMLambda;
-	private double[] sinMLambda;
+	private final double[] fieldSums = new double[ 2 ];
 
 	/**
 	 * Flag indicating whether the model finished loading.
@@ -189,47 +209,58 @@ public class PlotGravityModel
 	////////////////////////////////////////////////////////////////
 
 	/**
-	 * Cartesian coordinates of the grid points on the globe.
+	 * Gravity anomaly field (left globe).
 	 */
-	private float[][] meshX = new float[GRID_N][GRID_N];
-	private float[][] meshY = new float[GRID_N][GRID_N];
-	private float[][] meshZ = new float[GRID_N][GRID_N];
+	private final ScalarField anomalyField = new ScalarField( "gravity anomaly (mGal)" , "mGal" , COLOR_LIMIT_MILLIGAL , RELIEF_LIMIT_MILLIGAL );
 
 	/**
-	 * Display radius of each grid point on the exaggerated globe.
+	 * Geoid undulation field (right globe).
 	 */
-	private float[][] meshRadius = new float[GRID_N][GRID_N];
+	private final ScalarField undulationField = new ScalarField( "geoid undulation (m)" , "m" , COLOR_LIMIT_METERS , RELIEF_LIMIT_METERS );
 
 	/**
-	 * Color of each grid point.
+	 * Field whose relief the coastlines are currently draped onto. Set before each {@link Coastlines#updateGeometry(Coastlines.RadiusProvider)} call.
 	 */
-	private int[][] meshColor = new int[GRID_N][GRID_N];
+	private ScalarField coastlineField;
 
 	/**
-	 * Whether {@link #meshColor} and the coordinate arrays hold a valid mesh.
+	 * Whether the fields hold a valid mesh.
 	 */
 	private boolean meshReady;
 
 	/**
-	 * Minimum and maximum anomaly (in mGal) of the current mesh, and the degree used to evaluate it.
+	 * Degree used to evaluate the current mesh.
 	 */
-	private double anomalyMin;
-	private double anomalyMax;
 	private int viewDegree;
 
 	/**
-	 * View parameters used to produce the current mesh.
+	 * Whether the current mesh covers the whole sphere (zoomed out) rather than only the visible cap.
 	 */
-	private double meshCenterLatitude;
+	private boolean meshGlobal;
+
+	/**
+	 * View parameters used to produce the current mesh (shared by both fields). The center longitude is kept so the
+	 * coastline lookup can wrap longitudes to the mesh window.
+	 */
 	private double meshCenterLongitude;
-	private double meshHalfLatSpan;
-	private double meshHalfLonSpan;
 	private double meshLatMin;
 	private double meshLatMax;
 	private double meshLonMin;
 	private double meshLonMax;
 	private double meshCellLatDegrees;
 	private double meshCellLonDegrees;
+
+
+
+	////////////////////////////////////////////////////////////////
+	/// RENDERING STATE
+	////////////////////////////////////////////////////////////////
+
+	/**
+	 * Off-screen square buffers, one per globe.
+	 */
+	private PGraphics viewLeft;
+	private PGraphics viewRight;
 
 
 
@@ -264,7 +295,8 @@ public class PlotGravityModel
 	{
 		System.setProperty( "jogl.disable.opengles" , "false" );
 		System.setProperty( "jogamp.gluegen.UseTempJarCache" , "false" );
-		size( 1000 , 1000 , P3D );
+		// Twice as wide as tall: a square panel per globe.
+		size( 2000 , 1000 , P3D );
 		smooth( 8 );
 	}
 
@@ -272,24 +304,22 @@ public class PlotGravityModel
 	// identical use to setup in Processing IDE except for size()
 	public void setup()
 	{
-		sphereDetail( 32 );
 		textSize( 13 );
 		loadModel();
 		this.coastlines = Coastlines.loadNaturalEarth110m( GLOBE_RADIUS + COASTLINE_SURFACE_OFFSET );
+		// One square off-screen buffer per globe.
+		this.viewLeft = createGraphics( height , height , P3D );
+		this.viewRight = createGraphics( height , height , P3D );
 	}
 
 
 	// identical use to draw in Processing IDE
 	public void draw()
 	{
-		background(0);
-        lights();
-        
-		//background( 12 );
-        
-		
+		background( 0 );
+
 		if( !this.modelLoaded ) {
-			drawHud( ( this.loadError != null ) ? this.loadError : "Loading EGM2008 ..." );
+			drawOverlay( ( this.loadError != null ) ? this.loadError : "Loading EGM2008 ..." );
 			return;
 		}
 
@@ -298,20 +328,13 @@ public class PlotGravityModel
 			this.meshDirty = false;
 		}
 
-		applyProjectionAndCamera();
-		
-		// Globe body, shown behind the exaggerated colored cap.
-		lights();
-		noStroke();
-		fill( 40 );
-		sphere( GLOBE_BODY_RADIUS );
+		renderGlobe( this.viewLeft , this.anomalyField );
+		renderGlobe( this.viewRight , this.undulationField );
 
-		// Colored anomaly mesh and coastlines. Mesh colors already include a view-keyed hillshade.
-		noLights();
-		drawMesh();
-		this.coastlines.draw( this );
+		image( this.viewLeft , 0 , 0 );
+		image( this.viewRight , height , 0 );
 
-		drawHud( hudText() );
+		drawOverlay( hudText() );
 	}
 
 
@@ -323,12 +346,13 @@ public class PlotGravityModel
 	public void mouseDragged()
 	{
 		// Sensitivity scales with the visible span so the drag feels consistent at every zoom level.
+		// The panels are square, so both axes use the panel side (height) as the reference length.
 		double verticalSensitivity = visibleVerticalHalfSpanDegrees() / ( height * 0.5 );
-		double horizontalSensitivity = visibleHorizontalHalfSpanDegrees() / ( width * 0.5 );
+		double horizontalSensitivity = visibleHorizontalHalfSpanDegrees() / ( height * 0.5 );
 		this.centerLatitude += ( mouseY - pmouseY ) * verticalSensitivity;
 		this.centerLongitude -= ( mouseX - pmouseX ) * horizontalSensitivity / Math.max( Math.cos( Math.toRadians( this.centerLatitude ) ) , 0.05 );
 		this.centerLatitude = constrainLatitude( this.centerLatitude );
-		// The camera follows during the drag; the mesh is regenerated only when the space bar is pressed.
+		// The camera follows during the drag; the meshes are regenerated only when the space bar is pressed.
 	}
 
 
@@ -353,18 +377,34 @@ public class PlotGravityModel
 	////////////////////////////////////////////////////////////////
 
 	/**
-	 * Regenerates the colored mesh over the currently visible spherical cap.
+	 * Regenerates both colored meshes for the current view.
+	 * <p>
+	 * When zoomed out far enough the whole sphere is meshed (so it can be rotated without regenerating); otherwise only
+	 * the visible spherical cap is meshed, at a resolution that increases with the zoom.
 	 */
 	private void regenerateMesh()
 	{
-		double halfLatSpan = visibleVerticalHalfSpanDegrees();
-		double cosLat = Math.max( Math.cos( Math.toRadians( this.centerLatitude ) ) , 0.05 );
-		double halfLonSpan = Math.min( 180.0 , visibleHorizontalHalfSpanDegrees() / cosLat );
+		this.meshGlobal = visibleVerticalHalfSpanDegrees() >= GLOBAL_MODE_HALF_SPAN_DEGREES;
 
-		double latMin = constrainLatitude( this.centerLatitude - halfLatSpan );
-		double latMax = constrainLatitude( this.centerLatitude + halfLatSpan );
-		double lonMin = this.centerLongitude - halfLonSpan;
-		double lonMax = this.centerLongitude + halfLonSpan;
+		double latMin;
+		double latMax;
+		double lonMin;
+		double lonMax;
+		if( this.meshGlobal ) {
+			// Whole sphere: rotating then requires no regeneration.
+			latMin = -90.0;
+			latMax = 90.0;
+			lonMin = -180.0;
+			lonMax = 180.0;
+		} else {
+			double halfLatSpan = visibleVerticalHalfSpanDegrees();
+			double cosLat = Math.max( Math.cos( Math.toRadians( this.centerLatitude ) ) , 0.05 );
+			double halfLonSpan = Math.min( 180.0 , visibleHorizontalHalfSpanDegrees() / cosLat );
+			latMin = constrainLatitude( this.centerLatitude - halfLatSpan );
+			latMax = constrainLatitude( this.centerLatitude + halfLatSpan );
+			lonMin = this.centerLongitude - halfLonSpan;
+			lonMax = this.centerLongitude + halfLonSpan;
+		}
 
 		double cellLatDegrees = ( latMax - latMin ) / ( GRID_N - 1 );
 		double cellLonDegrees = ( lonMax - lonMin ) / ( GRID_N - 1 );
@@ -374,6 +414,7 @@ public class PlotGravityModel
 		this.meshLonMax = lonMax;
 		this.meshCellLatDegrees = cellLatDegrees;
 		this.meshCellLonDegrees = cellLonDegrees;
+		this.meshCenterLongitude = ( lonMin + lonMax ) * 0.5;
 
 		// Adapt the evaluation degree to the angular size of the grid cells (Nyquist), capped at the loaded degree.
 		this.viewDegree = (int) Math.round( 180.0 / Math.max( cellLatDegrees , 1.0e-6 ) );
@@ -381,97 +422,126 @@ public class PlotGravityModel
 
 		double gravitationalParameter = this.model.gravitationalParameter();
 		double referenceRadius = this.model.referenceRadius();
-		double scaleToMilligal = gravitationalParameter / ( referenceRadius * referenceRadius ) * 1.0e5;
+		double anomalyScaleToMilligal = gravitationalParameter / ( referenceRadius * referenceRadius ) * 1.0e5;
 
-		double minimum = Double.POSITIVE_INFINITY;
-		double maximum = Double.NEGATIVE_INFINITY;
-		double[] anomaly = new double[ GRID_N * GRID_N ];
+		this.anomalyField.resetRange();
+		this.undulationField.resetRange();
 
 		for( int i=0; i<GRID_N; i++ ) {
 			double latitude = latMin + i * cellLatDegrees;
 			double latitudeRad = Math.toRadians( latitude );
-			// Evaluate the Legendre functions once per latitude row, at  cos( colatitude ) = sin( latitude ) .
-			this.legendre.evaluate( Math.sin( latitudeRad ) );
 			double cosLatitude = Math.cos( latitudeRad );
 			double sinLatitude = Math.sin( latitudeRad );
+			// Set the colatitude once per row ( cos( colatitude ) = sin( latitude ) ): the evaluator then reuses this
+			// Legendre pass while the longitude varies along the row.
+			this.harmonics.setCosTheta( sinLatitude );
 			for( int j=0; j<GRID_N; j++ ) {
 				double longitude = lonMin + j * cellLonDegrees;
-				double value = evaluateAnomaly( longitude ) * scaleToMilligal;
-				anomaly[ i * GRID_N + j ] = value;
-				if( value < minimum ) {
-					minimum = value;
-				}
-				if( value > maximum ) {
-					maximum = value;
-				}
-				// Position on the globe surface, with signed radial relief exaggeration.
+				accumulateFieldSums( longitude );
+				double anomalyValue = this.fieldSums[1] * anomalyScaleToMilligal;
+				double undulationValue = this.fieldSums[0] * referenceRadius;
+
 				double longitudeRad = Math.toRadians( longitude );
-				float radius = radiusForAnomaly( value );
 				double geoX = cosLatitude * Math.cos( longitudeRad );
 				double geoY = cosLatitude * Math.sin( longitudeRad );
 				double geoZ = sinLatitude;
-				this.meshX[i][j] = (float) ( radius * geoY );
-				this.meshY[i][j] = (float) ( -radius * geoZ );
-				this.meshZ[i][j] = (float) ( radius * geoX );
-				this.meshRadius[i][j] = radius;
+
+				fillVertex( this.anomalyField , i , j , geoX , geoY , geoZ , anomalyValue );
+				fillVertex( this.undulationField , i , j , geoX , geoY , geoZ , undulationValue );
 			}
 		}
 
 		PVector lightDirection = rightSideLightDirection();
 		PVector viewDirection = surfaceDirection( this.centerLatitude , this.centerLongitude );
+		shadeField( this.anomalyField , lightDirection , viewDirection );
+		shadeField( this.undulationField , lightDirection , viewDirection );
 
-		// Map anomaly values to a stable, zero-centered color scale, then apply a fixed-view hillshade.
-		for( int i=0; i<GRID_N; i++ ) {
-			for( int j=0; j<GRID_N; j++ ) {
-				int baseColor = anomalyColor( anomaly[ i * GRID_N + j ] );
-				this.meshColor[i][j] = litMeshColor( baseColor , meshNormal( i , j ) , lightDirection , viewDirection );
-			}
-		}
+		this.anomalyField.shape = buildMeshShape( this.anomalyField );
+		this.undulationField.shape = buildMeshShape( this.undulationField );
 
-		this.anomalyMin = minimum;
-		this.anomalyMax = maximum;
-		this.meshCenterLatitude = this.centerLatitude;
-		this.meshCenterLongitude = this.centerLongitude;
-		this.meshHalfLatSpan = halfLatSpan;
-		this.meshHalfLonSpan = halfLonSpan;
 		this.meshReady = true;
-		this.coastlines.updateGeometry( this );
 	}
 
 
 	/**
-	 * Evaluates the gravity anomaly (without the {@code GM/a^2} scale) at the given longitude, for the latitude row last
-	 * passed to {@link PreNormalizedAssociatedLegendrePolynomialEvaluator#evaluate(double)}.
+	 * Accumulates the undulation and anomaly harmonic sums (without their final scales) at the given longitude, using the
+	 * {@link SphericalHarmonicsEvaluator} for the latitude (colatitude) set on the current row.
+	 * <p>
+	 * Going through the evaluator is the cross-check the library is meant to provide; its dirty-flag caching keeps the
+	 * Legendre pass shared across the row, so only the inexpensive azimuth part is recomputed here.
+	 * <p>
+	 * The result is written to {@link #fieldSums}: index 0 is the undulation sum, index 1 is the anomaly sum.
+	 * Both share the same inner term; the anomaly weights each degree by  ( l - 1 ) .
 	 *
 	 * @param longitudeDegrees	longitude in [deg].
-	 * @return	gravity anomaly contribution to be scaled by {@code GM/a^2}.
 	 */
-	private double evaluateAnomaly( double longitudeDegrees )
+	private void accumulateFieldSums( double longitudeDegrees )
 	{
 		double longitudeRad = Math.toRadians( longitudeDegrees );
-		double cosLambda = Math.cos( longitudeRad );
-		double sinLambda = Math.sin( longitudeRad );
-		this.cosMLambda[0] = 1.0;
-		this.sinMLambda[0] = 0.0;
-		for( int m=1; m<=this.viewDegree; m++ ) {
-			this.cosMLambda[m] = cosLambda * this.cosMLambda[m-1] - sinLambda * this.sinMLambda[m-1];
-			this.sinMLambda[m] = sinLambda * this.cosMLambda[m-1] + cosLambda * this.sinMLambda[m-1];
-		}
+		this.harmonics.setCosPhiAndSinPhi( Math.cos( longitudeRad ) , Math.sin( longitudeRad ) );
+		this.harmonics.evaluate();
 
-		double sum = 0.0;
+		double undulationSum = 0.0;
+		double anomalySum = 0.0;
 		for( int l=2; l<=this.viewDegree; l++ ) {
-			double degreeFactor = l - 1;
+			double degreeWeight = l - 1;
 			for( int m=0; m<=l; m++ ) {
 				double cBar = this.model.normalizedC( l , m );
 				if(  m == 0  &&  l <= 8  &&  ( l & 1 ) == 0  ) {
 					cBar -= this.ellipsoidZonal[l];
 				}
 				double sBar = this.model.normalizedS( l , m );
-				double pBar = this.geodeticFactor[m] * this.legendre.getPolynomialValue( l , m );
-				sum += degreeFactor * pBar * ( cBar * this.cosMLambda[m] + sBar * this.sinMLambda[m] );
+				// Geodetic combination  P_l^m ( C cos m lambda + S sin m lambda )  from the orthonormal harmonic parts.
+				double term = this.geodeticFactor[m] * ( cBar * this.harmonics.getSphericalHarmonicsRealPart( l , m )
+						+ sBar * this.harmonics.getSphericalHarmonicsImaginaryPart( l , m ) );
+				undulationSum += term;
+				anomalySum += degreeWeight * term;
 			}
 		}
-		return sum;
+		this.fieldSums[0] = undulationSum;
+		this.fieldSums[1] = anomalySum;
+	}
+
+
+	/**
+	 * Stores one grid vertex of a field, applying the field's signed radial relief exaggeration.
+	 *
+	 * @param field	field to fill.
+	 * @param i		latitude index.
+	 * @param j		longitude index.
+	 * @param geoX	geocentric unit direction x ( cos lat cos lon ).
+	 * @param geoY	geocentric unit direction y ( cos lat sin lon ).
+	 * @param geoZ	geocentric unit direction z ( sin lat ).
+	 * @param value	field value at this grid point.
+	 */
+	private void fillVertex( ScalarField field , int i , int j , double geoX , double geoY , double geoZ , double value )
+	{
+		field.value[i][j] = value;
+		field.updateRange( value );
+		float radius = radiusForValue( value , field.reliefLimit );
+		// Map the geocentric frame to Processing's display frame: +X east, +Y south, +Z toward lon/lat 0/0.
+		field.x[i][j] = (float) ( radius * geoY );
+		field.y[i][j] = (float) ( -radius * geoZ );
+		field.z[i][j] = (float) ( radius * geoX );
+		field.radius[i][j] = radius;
+	}
+
+
+	/**
+	 * Maps a field's values to a stable color scale and applies a fixed-view hillshade using that field's own relief.
+	 *
+	 * @param field			field to color.
+	 * @param lightDirection	key-light direction.
+	 * @param viewDirection	direction from globe center toward the camera.
+	 */
+	private void shadeField( ScalarField field , PVector lightDirection , PVector viewDirection )
+	{
+		for( int i=0; i<GRID_N; i++ ) {
+			for( int j=0; j<GRID_N; j++ ) {
+				int baseColor = colorForValue( field.value[i][j] , field.colorLimit );
+				field.color[i][j] = litMeshColor( baseColor , meshNormal( field , i , j ) , lightDirection , viewDirection );
+			}
+		}
 	}
 
 
@@ -481,12 +551,48 @@ public class PlotGravityModel
 	////////////////////////////////////////////////////////////////
 
 	/**
-	 * Sets the perspective projection and positions the camera so the view center faces it.
+	 * Renders one globe (backing sphere, colored mesh, coastlines) into an off-screen buffer using the shared camera.
+	 *
+	 * @param g		off-screen buffer.
+	 * @param field	field to render.
 	 */
-	private void applyProjectionAndCamera()
+	private void renderGlobe( PGraphics g , ScalarField field )
+	{
+		g.beginDraw();
+		g.background( 0 );
+		g.sphereDetail( 32 );
+		applyProjectionAndCamera( g );
+
+		// Backing sphere, shown behind the exaggerated colored cap.
+		g.lights();
+		g.noStroke();
+		g.fill( 40 );
+		g.sphere( GLOBE_BODY_RADIUS );
+
+		// Colored mesh (a retained shape built at regeneration), with pure colors that already include a view-keyed hillshade.
+		g.noLights();
+		if( field.shape != null ) {
+			g.shape( field.shape );
+		}
+
+		// Coastlines draped onto this field's relief.
+		this.coastlineField = field;
+		this.coastlines.updateGeometry( this );
+		this.coastlines.draw( g );
+
+		g.endDraw();
+	}
+
+
+	/**
+	 * Sets the perspective projection and positions the camera so the view center faces it.
+	 *
+	 * @param g	buffer whose camera and projection are set.
+	 */
+	private void applyProjectionAndCamera( PGraphics g )
 	{
 		float distance = GLOBE_RADIUS + this.altitude;
-		perspective( radians( (float) CAMERA_FOV_DEGREES ) , (float) width / height , GLOBE_RADIUS * 0.005f , GLOBE_RADIUS * 100.0f );
+		g.perspective( radians( (float) CAMERA_FOV_DEGREES ) , (float) g.width / g.height , GLOBE_RADIUS * 0.005f , GLOBE_RADIUS * 100.0f );
 
 		PVector direction = surfaceDirection( this.centerLatitude , this.centerLongitude );
 		PVector eye = PVector.mult( direction , distance );
@@ -500,62 +606,82 @@ public class PlotGravityModel
 		}
 		screenDown.normalize();
 
-		camera( eye.x , eye.y , eye.z , 0 , 0 , 0 , screenDown.x , screenDown.y , screenDown.z );
+		g.camera( eye.x , eye.y , eye.z , 0 , 0 , 0 , screenDown.x , screenDown.y , screenDown.z );
 	}
 
 
 	/**
-	 * Draws the colored anomaly mesh as a grid of quads with per-vertex colors.
+	 * Builds a retained shape for a field's colored mesh, as a grid of quads with per-vertex colors. The shape is built once
+	 * per regeneration and then drawn every frame, so navigating does not re-send the geometry.
+	 *
+	 * @param field	field to build the shape for.
+	 * @return	mesh shape ready to be drawn with {@link PGraphics#shape(PShape)}.
 	 */
-	private void drawMesh()
+	private PShape buildMeshShape( ScalarField field )
 	{
-		if( !this.meshReady ) {
-			return;
-		}
-		noStroke();
-		beginShape( QUADS );
+		PShape shape = createShape();
+		shape.beginShape( QUADS );
+		shape.noStroke();
 		for( int i=0; i<GRID_N-1; i++ ) {
 			for( int j=0; j<GRID_N-1; j++ ) {
-				meshVertex( i , j );
-				meshVertex( i , j+1 );
-				meshVertex( i+1 , j+1 );
-				meshVertex( i+1 , j );
+				addShapeVertex( shape , field , i , j );
+				addShapeVertex( shape , field , i , j+1 );
+				addShapeVertex( shape , field , i+1 , j+1 );
+				addShapeVertex( shape , field , i+1 , j );
 			}
 		}
-		endShape();
+		shape.endShape();
+		return shape;
 	}
 
+
 	/**
-	 * Emits one colored mesh vertex.
+	 * Adds one colored vertex to a mesh shape.
 	 *
+	 * @param shape	shape being built.
+	 * @param field	field being drawn.
 	 * @param i		latitude index.
 	 * @param j		longitude index.
 	 */
-	private void meshVertex( int i , int j )
+	private void addShapeVertex( PShape shape , ScalarField field , int i , int j )
 	{
-		fill( this.meshColor[i][j] );
-		vertex( this.meshX[i][j] , this.meshY[i][j] , this.meshZ[i][j] );
+		shape.fill( field.color[i][j] );
+		shape.vertex( field.x[i][j] , field.y[i][j] , field.z[i][j] );
 	}
 
 
 	/**
-	 * Draws the heads-up display (instructions, view info, and a color bar) in screen space.
+	 * Draws the heads-up display (instructions, view info, panel titles, and per-panel color bars) in screen space.
 	 *
-	 * @param info		text to show.
+	 * @param info	text to show.
 	 */
-	private void drawHud( String info )
+	private void drawOverlay( String info )
 	{
 		hint( DISABLE_DEPTH_TEST );
 		camera();
 		perspective();
 		noLights();
 
+		// Divider between the two panels.
+		stroke( 70 );
+		strokeWeight( 1 );
+		line( height , 0 , height , height );
+
+		// Controls and view info (top-left).
 		fill( 230 );
 		textAlign( LEFT , TOP );
 		text( info , 12 , 12 );
 
 		if( this.meshReady ) {
-			drawColorBar();
+			// Panel titles (top-center of each half).
+			textAlign( CENTER , TOP );
+			text( this.anomalyField.title , height * 0.5f , 12 );
+			text( this.undulationField.title , height * 1.5f , 12 );
+			textAlign( LEFT , TOP );
+
+			// Per-panel color bars near the right edge of each half.
+			drawColorBar( height - 56 , this.anomalyField );
+			drawColorBar( 2 * height - 56 , this.undulationField );
 		}
 
 		hint( ENABLE_DEPTH_TEST );
@@ -563,11 +689,13 @@ public class PlotGravityModel
 
 
 	/**
-	 * Draws a vertical color bar with the fixed anomaly color scale.
+	 * Draws a vertical color bar with a field's fixed color scale.
+	 *
+	 * @param barX	left edge of the bar, in pixels.
+	 * @param field	field whose scale is drawn.
 	 */
-	private void drawColorBar()
+	private void drawColorBar( float barX , ScalarField field )
 	{
-		int barX = width - 40;
 		int barY = 60;
 		int barWidth = 18;
 		int barHeight = 300;
@@ -579,9 +707,9 @@ public class PlotGravityModel
 		}
 		fill( 230 );
 		textAlign( RIGHT , CENTER );
-		text( String.format( "+%.0f mGal" , COLOR_LIMIT_MILLIGAL ) , barX - 4 , barY );
+		text( String.format( "+%.0f %s" , field.colorLimit , field.unit ) , barX - 4 , barY );
 		text( "0" , barX - 4 , barY + barHeight * 0.5f );
-		text( String.format( "-%.0f mGal" , COLOR_LIMIT_MILLIGAL ) , barX - 4 , barY + barHeight );
+		text( String.format( "-%.0f %s" , field.colorLimit , field.unit ) , barX - 4 , barY + barHeight );
 		textAlign( LEFT , TOP );
 	}
 
@@ -604,13 +732,15 @@ public class PlotGravityModel
 
 	/**
 	 * Returns the horizontal half-angle (in degrees) of the globe patch framed by the perspective projection.
+	 * <p>
+	 * The panels are square, so the horizontal field of view equals the vertical one.
 	 *
 	 * @return	horizontal visible patch half-angle, in degrees.
 	 */
 	private double visibleHorizontalHalfSpanDegrees()
 	{
 		double verticalHalfAngle = Math.toRadians( CAMERA_FOV_DEGREES * 0.5 );
-		double horizontalHalfAngle = Math.atan( Math.tan( verticalHalfAngle ) * (double) width / (double) height );
+		double horizontalHalfAngle = Math.atan( Math.tan( verticalHalfAngle ) * 1.0 );
 		return visibleHalfSpanForRayAngle( horizontalHalfAngle );
 	}
 
@@ -688,14 +818,15 @@ public class PlotGravityModel
 
 
 	/**
-	 * Maps an anomaly value to the fixed rainbow color scale.
+	 * Maps a value to the fixed rainbow color scale of half-amplitude {@code colorLimit}.
 	 *
-	 * @param anomalyMilligal	gravity anomaly in [mGal].
+	 * @param value			field value.
+	 * @param colorLimit	value mapped to the top of the scale.
 	 * @return	packed color.
 	 */
-	private int anomalyColor( double anomalyMilligal )
+	private int colorForValue( double value , double colorLimit )
 	{
-		double t = 0.5 + 0.5 * anomalyMilligal / COLOR_LIMIT_MILLIGAL;
+		double t = 0.5 + 0.5 * value / colorLimit;
 		return rainbowColor( (float) t );
 	}
 
@@ -734,11 +865,12 @@ public class PlotGravityModel
 	/**
 	 * Estimates the outward normal of an exaggerated mesh vertex from neighboring mesh coordinates.
 	 *
+	 * @param field	field whose mesh is used.
 	 * @param i	latitude index.
 	 * @param j	longitude index.
 	 * @return	unit normal vector.
 	 */
-	private PVector meshNormal( int i , int j )
+	private PVector meshNormal( ScalarField field , int i , int j )
 	{
 		int im = Math.max( 0 , i - 1 );
 		int ip = Math.min( GRID_N - 1 , i + 1 );
@@ -746,16 +878,16 @@ public class PlotGravityModel
 		int jp = Math.min( GRID_N - 1 , j + 1 );
 
 		PVector dLatitude = new PVector(
-				this.meshX[ip][j] - this.meshX[im][j] ,
-				this.meshY[ip][j] - this.meshY[im][j] ,
-				this.meshZ[ip][j] - this.meshZ[im][j] );
+				field.x[ip][j] - field.x[im][j] ,
+				field.y[ip][j] - field.y[im][j] ,
+				field.z[ip][j] - field.z[im][j] );
 		PVector dLongitude = new PVector(
-				this.meshX[i][jp] - this.meshX[i][jm] ,
-				this.meshY[i][jp] - this.meshY[i][jm] ,
-				this.meshZ[i][jp] - this.meshZ[i][jm] );
+				field.x[i][jp] - field.x[i][jm] ,
+				field.y[i][jp] - field.y[i][jm] ,
+				field.z[i][jp] - field.z[i][jm] );
 
 		PVector normal = cross( dLatitude , dLongitude );
-		PVector outward = new PVector( this.meshX[i][j] , this.meshY[i][j] , this.meshZ[i][j] );
+		PVector outward = new PVector( field.x[i][j] , field.y[i][j] , field.z[i][j] );
 		if( normal.magSq() < 1.0e-6 ) {
 			normal = outward;
 		}
@@ -768,9 +900,9 @@ public class PlotGravityModel
 
 
 	/**
-	 * Applies a warm right-side key light and cool shadow tint to a scientific anomaly color.
+	 * Applies a warm right-side key light and cool shadow tint to a scientific color.
 	 *
-	 * @param baseColor		scientific anomaly color.
+	 * @param baseColor		scientific color.
 	 * @param normal		mesh surface normal.
 	 * @param lightDirection	direction from the surface toward the key light.
 	 * @param viewDirection	direction from globe center toward the camera.
@@ -806,14 +938,15 @@ public class PlotGravityModel
 
 
 	/**
-	 * Returns the display radius for an anomaly, with a square-root response to make small details visible.
+	 * Returns the display radius for a value, with a square-root response to make small details visible.
 	 *
-	 * @param anomalyMilligal	gravity anomaly in [mGal].
+	 * @param value			field value.
+	 * @param reliefLimit	value mapped to the full relief exaggeration.
 	 * @return	exaggerated display radius.
 	 */
-	private static float radiusForAnomaly( double anomalyMilligal )
+	private static float radiusForValue( double value , double reliefLimit )
 	{
-		double normalized = Math.max( -1.0 , Math.min( 1.0 , anomalyMilligal / RELIEF_LIMIT_MILLIGAL ) );
+		double normalized = Math.max( -1.0 , Math.min( 1.0 , value / reliefLimit ) );
 		double shaped = Math.copySign( Math.sqrt( Math.abs( normalized ) ) , normalized );
 		return (float) ( GLOBE_RADIUS + RELIEF_EXAGGERATION * shaped );
 	}
@@ -821,6 +954,8 @@ public class PlotGravityModel
 
 	/**
 	 * Returns the current mesh radius at a coastline lon/lat point, plus a tiny drawing offset.
+	 * <p>
+	 * Uses the relief of {@link #coastlineField}, the field whose globe is currently being rendered.
 	 *
 	 * @param latitudeDegrees	latitude in [deg].
 	 * @param longitudeDegrees	longitude in [deg].
@@ -829,7 +964,7 @@ public class PlotGravityModel
 	@Override
 	public float radiusAt( double latitudeDegrees , double longitudeDegrees )
 	{
-		if( this.meshCellLatDegrees <= 0.0 || this.meshCellLonDegrees <= 0.0
+		if( this.coastlineField == null || this.meshCellLatDegrees <= 0.0 || this.meshCellLonDegrees <= 0.0
 				|| latitudeDegrees < this.meshLatMin || latitudeDegrees > this.meshLatMax ) {
 			return GLOBE_RADIUS + COASTLINE_SURFACE_OFFSET;
 		}
@@ -846,10 +981,11 @@ public class PlotGravityModel
 		double u = Math.max( 0.0 , Math.min( 1.0 , row - i0 ) );
 		double v = Math.max( 0.0 , Math.min( 1.0 , column - j0 ) );
 
-		double r00 = this.meshRadius[i0][j0];
-		double r01 = this.meshRadius[i0][j0+1];
-		double r10 = this.meshRadius[i0+1][j0];
-		double r11 = this.meshRadius[i0+1][j0+1];
+		float[][] radius = this.coastlineField.radius;
+		double r00 = radius[i0][j0];
+		double r01 = radius[i0][j0+1];
+		double r10 = radius[i0+1][j0];
+		double r11 = radius[i0+1][j0+1];
 		double r0 = r00 * ( 1.0 - v ) + r01 * v;
 		double r1 = r10 * ( 1.0 - v ) + r11 * v;
 		return (float) ( r0 * ( 1.0 - u ) + r1 * u + COASTLINE_SURFACE_OFFSET );
@@ -897,17 +1033,17 @@ public class PlotGravityModel
 	private String hudText()
 	{
 		return String.format(
-				"EGM2008 gravity anomaly%n" +
+				"EGM2008  (left: gravity anomaly , right: geoid undulation)%n" +
 				"drag: latitude/longitude   wheel: zoom   space: regenerate%n" +
 				"view center: %.1f deg lat , %.1f deg lon   half-span: %.2f deg lat , %.2f deg lon%n" +
-				"mesh center: %.1f deg lat , %.1f deg lon   half-span: %.2f deg lat , %.2f deg lon%n" +
-				"mesh anomaly: %.0f to %.0f mGal   degree: %d / %d%n" +
+				"mesh: %s   degree: %d / %d%n" +
+				"anomaly: %.0f to %.0f mGal   undulation: %.1f to %.1f m%n" +
 				"%s" ,
 				this.centerLatitude , wrapLongitude( this.centerLongitude ) ,
 				visibleVerticalHalfSpanDegrees() , visibleHorizontalHalfSpanDegrees() ,
-				this.meshCenterLatitude , wrapLongitude( this.meshCenterLongitude ) ,
-				this.meshHalfLatSpan , this.meshHalfLonSpan ,
-				this.anomalyMin , this.anomalyMax , this.viewDegree , this.modelMaxDegree ,
+				( this.meshGlobal ? "whole globe" : "visible cap" ) , this.viewDegree , this.modelMaxDegree ,
+				this.anomalyField.valueMin , this.anomalyField.valueMax ,
+				this.undulationField.valueMin , this.undulationField.valueMax ,
 				this.coastlines.status() );
 	}
 
@@ -966,7 +1102,7 @@ public class PlotGravityModel
 			return;
 		}
 		this.modelMaxDegree = this.model.maximumDegree();
-		this.legendre = new PreNormalizedAssociatedLegendrePolynomialEvaluator( Math.max( 1 , this.modelMaxDegree ) );
+		this.harmonics = new SphericalHarmonicsEvaluator( Math.max( 1 , this.modelMaxDegree ) );
 
 		this.geodeticFactor = new double[ this.modelMaxDegree + 1 ];
 		for( int m=0; m<this.geodeticFactor.length; m++ ) {
@@ -974,9 +1110,6 @@ public class PlotGravityModel
 			double normalization = ( m == 0 ) ? 1.0 : 2.0;
 			this.geodeticFactor[m] = sign * Math.sqrt( 4.0 * Math.PI * normalization );
 		}
-
-		this.cosMLambda = new double[ this.modelMaxDegree + 1 ];
-		this.sinMLambda = new double[ this.modelMaxDegree + 1 ];
 
 		this.ellipsoidZonal = referenceEllipsoidZonalCoefficients();
 		this.modelLoaded = true;
@@ -990,25 +1123,14 @@ public class PlotGravityModel
 	 */
 	private static String locateGfcPath()
 	{
-		return locateExistingPath( GFC_CANDIDATE_PATHS );
-	}
-
-
-	/**
-	 * Returns the first existing candidate path, or {@code null} if none exist.
-	 *
-	 * @param candidatePaths	relative paths to check.
-	 * @return	first existing path, or {@code null}.
-	 */
-	private static String locateExistingPath( String[] candidatePaths )
-	{
-		for( String candidatePath : candidatePaths ) {
+		for( String candidatePath : GFC_CANDIDATE_PATHS ) {
 			if( Files.exists( Paths.get( candidatePath ) ) ) {
 				return candidatePath;
 			}
 		}
 		return null;
 	}
+
 
 	/**
 	 * Returns the fully normalized even zonal harmonic coefficients of the GRS80 reference ellipsoid, indexed by degree.
@@ -1033,6 +1155,98 @@ public class PlotGravityModel
 			coefficients[ degree ] = -j / Math.sqrt( 2.0 * degree + 1.0 );
 		}
 		return coefficients;
+	}
+
+
+
+	////////////////////////////////////////////////////////////////
+	/// NESTED TYPES
+	////////////////////////////////////////////////////////////////
+
+	/**
+	 * One scalar field sampled on the view grid: its values, exaggerated globe geometry, per-vertex colors, and display metadata.
+	 */
+	private static final class ScalarField
+	{
+		/**
+		 * Panel title.
+		 */
+		private final String title;
+
+		/**
+		 * Value unit, shown on the color bar.
+		 */
+		private final String unit;
+
+		/**
+		 * Value mapped to the extreme of the color scale.
+		 */
+		private final double colorLimit;
+
+		/**
+		 * Value mapped to the full radial relief exaggeration.
+		 */
+		private final double reliefLimit;
+
+		/**
+		 * Field value at each grid point.
+		 */
+		private final double[][] value = new double[GRID_N][GRID_N];
+
+		/**
+		 * Display coordinates of each grid point on the exaggerated globe.
+		 */
+		private final float[][] x = new float[GRID_N][GRID_N];
+		private final float[][] y = new float[GRID_N][GRID_N];
+		private final float[][] z = new float[GRID_N][GRID_N];
+
+		/**
+		 * Display radius of each grid point.
+		 */
+		private final float[][] radius = new float[GRID_N][GRID_N];
+
+		/**
+		 * Color of each grid point.
+		 */
+		private final int[][] color = new int[GRID_N][GRID_N];
+
+		/**
+		 * Retained shape of the colored mesh, rebuilt on each regeneration and drawn every frame.
+		 */
+		private PShape shape;
+
+		/**
+		 * Minimum and maximum value of the current mesh.
+		 */
+		private double valueMin;
+		private double valueMax;
+
+
+		private ScalarField( String title , String unit , double colorLimit , double reliefLimit )
+		{
+			this.title = title;
+			this.unit = unit;
+			this.colorLimit = colorLimit;
+			this.reliefLimit = reliefLimit;
+		}
+
+
+		private void resetRange()
+		{
+			this.valueMin = Double.POSITIVE_INFINITY;
+			this.valueMax = Double.NEGATIVE_INFINITY;
+		}
+
+
+		private void updateRange( double value )
+		{
+			if( value < this.valueMin ) {
+				this.valueMin = value;
+			}
+			if( value > this.valueMax ) {
+				this.valueMax = value;
+			}
+		}
 	}
 
 }
