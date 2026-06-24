@@ -57,7 +57,7 @@ public class PlotGravityModel
 	/**
 	 * Number of grid points evaluated along latitude and along longitude. This count is fixed; the coordinates change with the view.
 	 */
-	private static final int GRID_N = 256;
+	private static final int GRID_N = 128;
 
 	/**
 	 * Radius of the globe in world units.
@@ -111,19 +111,24 @@ public class PlotGravityModel
 	private static final float COASTLINE_SURFACE_OFFSET = 0.8f;
 
 	/**
-	 * Minimum lighting level for the color-shaded mesh.
+	 * Ambient light color (per channel, 0..255) used by the GPU lighting. Slightly cool, to tint the shadowed side.
 	 */
-	private static final float MESH_LIGHT_AMBIENT = 0.30f;
+	private static final float AMBIENT_LIGHT_R = 64.0f;
+	private static final float AMBIENT_LIGHT_G = 68.0f;
+	private static final float AMBIENT_LIGHT_B = 80.0f;
 
 	/**
-	 * Diffuse lighting contribution for the color-shaded mesh.
+	 * Key (directional) light color (per channel, 0..255) used by the GPU lighting. Slightly warm.
 	 */
-	private static final float MESH_LIGHT_DIFFUSE = 0.82f;
+	private static final float KEY_LIGHT_R = 216.0f;
+	private static final float KEY_LIGHT_G = 210.0f;
+	private static final float KEY_LIGHT_B = 198.0f;
 
 	/**
-	 * Cool extra shadow tint applied where the right-hand key light grazes the exaggerated relief.
+	 * Forward (toward-camera) component of the mouse-controlled light. Smaller values make the light graze more for a given
+	 * mouse offset, exaggerating relief; at the panel center the light is head-on and the relief looks flat.
 	 */
-	private static final float MESH_SHADOW_BLUE = 0.10f;
+	private static final float MOUSE_LIGHT_DEPTH = 0.1f;
 
 	/**
 	 * Candidate locations of the EGM2008 {@code .gfc} file, relative to the working directory.
@@ -201,6 +206,13 @@ public class PlotGravityModel
 	 * Flag requesting a mesh regeneration on the next frame.
 	 */
 	private boolean meshDirty = true;
+
+	/**
+	 * Whether the mouse position controls the light direction (toggled with the 'l' key). When active, moving the mouse
+	 * sweeps the light so grazing illumination reveals relief detail. The light is applied by the GPU every frame, so
+	 * this is free to change.
+	 */
+	private boolean mouseControlsLight;
 
 
 
@@ -367,6 +379,9 @@ public class PlotGravityModel
 	{
 		if( this.key == ' ' ) {
 			this.meshDirty = true;
+		} else if( this.key == 'l'  ||  this.key == 'L' ) {
+			// The light direction is read every frame in renderGlobe, so toggling is all that is needed.
+			this.mouseControlsLight = !this.mouseControlsLight;
 		}
 	}
 
@@ -451,11 +466,7 @@ public class PlotGravityModel
 			}
 		}
 
-		PVector lightDirection = rightSideLightDirection();
-		PVector viewDirection = surfaceDirection( this.centerLatitude , this.centerLongitude );
-		shadeField( this.anomalyField , lightDirection , viewDirection );
-		shadeField( this.undulationField , lightDirection , viewDirection );
-
+		// Colors and geometry are light-independent; the shapes are built once here and lit by the GPU every frame.
 		this.anomalyField.shape = buildMeshShape( this.anomalyField );
 		this.undulationField.shape = buildMeshShape( this.undulationField );
 
@@ -518,30 +529,14 @@ public class PlotGravityModel
 	{
 		field.value[i][j] = value;
 		field.updateRange( value );
+		// Pure scientific color: the shading is applied by the GPU light, not baked in, so the light can move for free.
+		field.color[i][j] = colorForValue( value , field.colorLimit );
 		float radius = radiusForValue( value , field.reliefLimit );
 		// Map the geocentric frame to Processing's display frame: +X east, +Y south, +Z toward lon/lat 0/0.
 		field.x[i][j] = (float) ( radius * geoY );
 		field.y[i][j] = (float) ( -radius * geoZ );
 		field.z[i][j] = (float) ( radius * geoX );
 		field.radius[i][j] = radius;
-	}
-
-
-	/**
-	 * Maps a field's values to a stable color scale and applies a fixed-view hillshade using that field's own relief.
-	 *
-	 * @param field			field to color.
-	 * @param lightDirection	key-light direction.
-	 * @param viewDirection	direction from globe center toward the camera.
-	 */
-	private void shadeField( ScalarField field , PVector lightDirection , PVector viewDirection )
-	{
-		for( int i=0; i<GRID_N; i++ ) {
-			for( int j=0; j<GRID_N; j++ ) {
-				int baseColor = colorForValue( field.value[i][j] , field.colorLimit );
-				field.color[i][j] = litMeshColor( baseColor , meshNormal( field , i , j ) , lightDirection , viewDirection );
-			}
-		}
 	}
 
 
@@ -563,19 +558,25 @@ public class PlotGravityModel
 		g.sphereDetail( 32 );
 		applyProjectionAndCamera( g );
 
+		// Light the scene with the current (fixed or mouse-controlled) direction. The GPU shades the static mesh every
+		// frame, so moving the light costs nothing on the CPU. directionalLight() wants the direction the light travels,
+		// which is opposite to the surface-to-light direction returned here.
+		PVector light = currentLightDirection();
+		g.ambientLight( AMBIENT_LIGHT_R , AMBIENT_LIGHT_G , AMBIENT_LIGHT_B );
+		g.directionalLight( KEY_LIGHT_R , KEY_LIGHT_G , KEY_LIGHT_B , -light.x , -light.y , -light.z );
+
 		// Backing sphere, shown behind the exaggerated colored cap.
-		g.lights();
 		g.noStroke();
 		g.fill( 40 );
 		g.sphere( GLOBE_BODY_RADIUS );
 
-		// Colored mesh (a retained shape built at regeneration), with pure colors that already include a view-keyed hillshade.
-		g.noLights();
+		// Colored mesh (a retained shape built at regeneration): pure scientific colors lit by the GPU directional light.
 		if( field.shape != null ) {
 			g.shape( field.shape );
 		}
 
-		// Coastlines draped onto this field's relief.
+		// Coastlines draped onto this field's relief (drawn unlit).
+		g.noLights();
 		this.coastlineField = field;
 		this.coastlines.updateGeometry( this );
 		this.coastlines.draw( g );
@@ -636,7 +637,7 @@ public class PlotGravityModel
 
 
 	/**
-	 * Adds one colored vertex to a mesh shape.
+	 * Adds one vertex to a mesh shape, with its outward normal (for GPU lighting) and pure scientific color (the material).
 	 *
 	 * @param shape	shape being built.
 	 * @param field	field being drawn.
@@ -645,6 +646,8 @@ public class PlotGravityModel
 	 */
 	private void addShapeVertex( PShape shape , ScalarField field , int i , int j )
 	{
+		PVector normal = meshNormal( field , i , j );
+		shape.normal( normal.x , normal.y , normal.z );
 		shape.fill( field.color[i][j] );
 		shape.vertex( field.x[i][j] , field.y[i][j] , field.z[i][j] );
 	}
@@ -854,9 +857,61 @@ public class PlotGravityModel
 		screenRight.normalize();
 
 		PVector light = new PVector( 0 , 0 , 0 );
-		light.add( PVector.mult( screenRight , 0.76f ) );
-		light.add( PVector.mult( screenDown , -0.22f ) );
-		light.add( PVector.mult( view , 0.60f ) );
+		light.add( PVector.mult( screenRight , 0.65f ) );
+		light.add( PVector.mult( screenDown , -0.0f ) );
+		light.add( PVector.mult( view , -0.35f ) );
+		light.normalize();
+		return light;
+	}
+
+
+	/**
+	 * Returns the light direction currently in effect: the mouse-controlled direction when that mode is on, otherwise the fixed key light.
+	 *
+	 * @return	unit light direction in display coordinates.
+	 */
+	private PVector currentLightDirection()
+	{
+		return this.mouseControlsLight ? mouseLightDirection() : rightSideLightDirection();
+	}
+
+
+	/**
+	 * Returns a light direction driven by the mouse position (used while the mouse-light mode is on).
+	 * <p>
+	 * The mouse offset from the center of the panel it hovers maps to screen-right and screen-down components, plus a
+	 * fixed forward component toward the camera. Hovering near the center lights the globe head-on (flat); moving outward
+	 * makes the light graze the relief, revealing detail.
+	 *
+	 * @return	unit light direction in display coordinates.
+	 */
+	private PVector mouseLightDirection()
+	{
+		PVector view = surfaceDirection( this.centerLatitude , this.centerLongitude );
+		PVector north = localNorthDirection( this.centerLatitude , this.centerLongitude );
+		PVector screenDown = PVector.mult( north , -1.0f );
+		screenDown.sub( PVector.mult( view , screenDown.dot( view ) ) );
+		if( screenDown.magSq() < 1.0e-6 ) {
+			screenDown = new PVector( 0 , 1 , 0 );
+		}
+		screenDown.normalize();
+
+		PVector screenRight = cross( screenDown , view );
+		if( screenRight.magSq() < 1.0e-6 ) {
+			screenRight = new PVector( 1 , 0 , 0 );
+		}
+		screenRight.normalize();
+
+		// Mouse offset from the center of the panel it is over, in [-1,1].
+		float halfPanel = height * 0.5f;
+		float panelCenterX = ( mouseX < height ) ? halfPanel : height + halfPanel;
+		float ndcX = constrain( ( mouseX - panelCenterX ) / halfPanel , -1.0f , 1.0f );
+		float ndcY = constrain( ( mouseY - halfPanel ) / halfPanel , -1.0f , 1.0f );
+
+		PVector light = new PVector( 0 , 0 , 0 );
+		light.add( PVector.mult( screenRight , ndcX ) );
+		light.add( PVector.mult( screenDown , ndcY ) );
+		light.add( PVector.mult( view , MOUSE_LIGHT_DEPTH ) );
 		light.normalize();
 		return light;
 	}
@@ -896,32 +951,6 @@ public class PlotGravityModel
 		}
 		normal.normalize();
 		return normal;
-	}
-
-
-	/**
-	 * Applies a warm right-side key light and cool shadow tint to a scientific color.
-	 *
-	 * @param baseColor		scientific color.
-	 * @param normal		mesh surface normal.
-	 * @param lightDirection	direction from the surface toward the key light.
-	 * @param viewDirection	direction from globe center toward the camera.
-	 * @return	lit display color.
-	 */
-	private int litMeshColor( int baseColor , PVector normal , PVector lightDirection , PVector viewDirection )
-	{
-		float light = constrain( normal.dot( lightDirection ) , -1.0f , 1.0f );
-		float diffuse = (float) Math.pow( Math.max( 0.0f , light ) , 0.72 );
-		float shade = MESH_LIGHT_AMBIENT + MESH_LIGHT_DIFFUSE * diffuse;
-		float shadow = Math.max( 0.0f , -light );
-		float rim = (float) Math.pow( Math.max( 0.0f , 1.0f - Math.max( 0.0f , normal.dot( viewDirection ) ) ) , 2.0 );
-
-		float r = red( baseColor ) * shade + 18.0f * diffuse + 8.0f * rim;
-		float g = green( baseColor ) * shade + 12.0f * diffuse + 10.0f * rim;
-		float b = blue( baseColor ) * ( shade + MESH_SHADOW_BLUE * shadow ) + 15.0f * rim;
-		return color( constrain( r , 0.0f , 255.0f ) ,
-				constrain( g , 0.0f , 255.0f ) ,
-				constrain( b , 0.0f , 255.0f ) );
 	}
 
 
@@ -1034,11 +1063,12 @@ public class PlotGravityModel
 	{
 		return String.format(
 				"EGM2008  (left: gravity anomaly , right: geoid undulation)%n" +
-				"drag: latitude/longitude   wheel: zoom   space: regenerate%n" +
+				"drag: latitude/longitude   wheel: zoom   space: regenerate   l: mouse light (%s)%n" +
 				"view center: %.1f deg lat , %.1f deg lon   half-span: %.2f deg lat , %.2f deg lon%n" +
 				"mesh: %s   degree: %d / %d%n" +
 				"anomaly: %.0f to %.0f mGal   undulation: %.1f to %.1f m%n" +
 				"%s" ,
+				( this.mouseControlsLight ? "on" : "off" ) ,
 				this.centerLatitude , wrapLongitude( this.centerLongitude ) ,
 				visibleVerticalHalfSpanDegrees() , visibleHorizontalHalfSpanDegrees() ,
 				( this.meshGlobal ? "whole globe" : "visible cap" ) , this.viewDegree , this.modelMaxDegree ,
