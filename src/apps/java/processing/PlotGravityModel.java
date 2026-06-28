@@ -5,7 +5,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 
-import geophysicalModelLibrary.Egm2008;
+import geophysicalModelLibrary.gravityModels.Egm2008;
 import numericalLibrary.functions.SphericalHarmonicsEvaluator;
 import utils.Coastlines;
 
