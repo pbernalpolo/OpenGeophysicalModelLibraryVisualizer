@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 
 import controlP5.ControlP5;
+import controlP5.RadioButton;
 import controlP5.Slider;
 
 import geophysicalModelLibrary.magneticModels.WorldMagneticModel;
@@ -22,18 +23,24 @@ import processing.event.MouseEvent;
 /**
  * Interactive 3D visualization of the World Magnetic Model (WMM).
  * <p>
- * The Earth is drawn as a globe with coastlines, and the magnetic field is shown as a grid of vector glyphs over a
- * spherical shell at a selectable altitude: each glyph is oriented along the field (showing the declination and
- * inclination) and colored by the total field intensity. Two ControlP5 sliders control the decimal year (within the
- * model validity window, exercising the secular variation) and the altitude.
+ * The Earth is drawn as a globe with coastlines, and the magnetic field is shown as a grid of glyphs over a spherical
+ * shell whose radius grows with a selectable altitude, so the altitude slider scans through altitude shells. Each glyph
+ * is a stick capped at its head by a small three-sided pyramid; a radio button selects what it shows:
+ * <ul>
+ * <li> 3D vector: the full field direction, colored by total intensity.
+ * <li> horizontal needle: the field projected onto the local north-east plane at fixed length, colored by the vertical
+ *      component (red where the field points up / out of the ground, blue where it points down / in).
+ * <li> horizontal magnitude: the same horizontal projection but with the stick length scaled by the horizontal
+ *      magnitude, also colored by the vertical component.
+ * </ul>
+ * Two ControlP5 sliders control the decimal year (within the model validity window, exercising the secular variation)
+ * and the altitude.
  * <p>
  * Interaction:
  * <ul>
- * <li> Drag with the mouse to rotate the globe (away from the sliders).
+ * <li> Drag with the mouse to rotate the globe (away from the controls).
  * <li> Mouse wheel to zoom in and out.
  * </ul>
- * This is a first version, meant to be refined (for example with field-line tracing, or coloring by declination /
- * inclination instead of intensity).
  */
 public class PlotMagneticFieldModel
 	extends PApplet
@@ -79,10 +86,38 @@ public class PlotMagneticFieldModel
 	private static final float GLYPH_LIFT = 2.0f;
 
 	/**
-	 * Field intensities mapped to the bottom and top of the color scale, in [nT].
+	 * Field representations selectable with the radio buttons.
+	 * {@link #REPRESENTATION_VECTOR_3D} draws the full field direction, colored by total intensity.
+	 * {@link #REPRESENTATION_HORIZONTAL} draws the field projected onto the local north-east plane as a fixed-length
+	 * compass needle, colored by the vertical component (red where the field points up/out, blue where it points down/in).
+	 * {@link #REPRESENTATION_HORIZONTAL_MAGNITUDE} draws the same horizontal projection but with the stick length scaled by
+	 * the horizontal magnitude, also colored by the vertical component.
 	 */
-	private static final float INTENSITY_MIN_NANOTESLA = 20000.0f;
-	private static final float INTENSITY_MAX_NANOTESLA = 68000.0f;
+	private static final int REPRESENTATION_VECTOR_3D = 0;
+	private static final int REPRESENTATION_HORIZONTAL = 1;
+	private static final int REPRESENTATION_HORIZONTAL_MAGNITUDE = 2;
+
+	/**
+	 * Height and base radius of a glyph's three-sided pyramid tip, as fractions of that glyph's length.
+	 */
+	private static final float PYRAMID_HEIGHT_FRACTION = 0.25f;
+	private static final float PYRAMID_RADIUS_FRACTION = 0.1f;
+
+	/**
+	 * Total-intensity range mapped to the rainbow color scale in the 3D-vector representation. [nT]
+	 */
+	private static final float INTENSITY_MIN_NANOTESLA = 22000.0f;
+	private static final float INTENSITY_MAX_NANOTESLA = 66000.0f;
+
+	/**
+	 * Vertical-component magnitude mapped to fully saturated red / blue in the horizontal representations. [nT]
+	 */
+	private static final float VERTICAL_COMPONENT_SCALE_NANOTESLA = 70000.0f;
+
+	/**
+	 * Horizontal magnitude that maps to one glyph length in the horizontal-magnitude representation. [nT]
+	 */
+	private static final float HORIZONTAL_INTENSITY_SCALE_NANOTESLA = 30000.0f;
 
 	/**
 	 * Maximum altitude offered by the altitude slider, in [km].
@@ -135,6 +170,11 @@ public class PlotMagneticFieldModel
 	private Slider altitudeSlider;
 
 	/**
+	 * Radio button selecting the field representation.
+	 */
+	private RadioButton representationRadio;
+
+	/**
 	 * Latitude and longitude (in degrees) of the point brought in front of the camera.
 	 */
 	private double centerLatitude = 20.0;
@@ -151,10 +191,11 @@ public class PlotMagneticFieldModel
 	private PShape fieldGlyphs;
 
 	/**
-	 * Year and altitude [km] for which {@link #fieldGlyphs} was built, to detect slider changes.
+	 * Year, altitude [km], and representation for which {@link #fieldGlyphs} was built, to detect changes.
 	 */
 	private double builtYear = Double.NaN;
 	private double builtAltitudeKilometers = Double.NaN;
+	private int builtRepresentation = -1;
 
 
 
@@ -197,6 +238,13 @@ public class PlotMagneticFieldModel
 		this.altitudeSlider = this.controls.addSlider( "altitude [km]" )
 				.setPosition( 20 , this.height - 32 ).setSize( 320 , 18 )
 				.setRange( 0.0f , MAX_ALTITUDE_KILOMETERS ).setValue( 0.0f );
+
+		this.representationRadio = this.controls.addRadioButton( "representation" )
+				.setPosition( this.width - 240 , 24 ).setSize( 14 , 14 ).setSpacingRow( 6 )
+				.addItem( "3D vector (intensity)" , REPRESENTATION_VECTOR_3D )
+				.addItem( "horizontal needle (vertical comp.)" , REPRESENTATION_HORIZONTAL )
+				.addItem( "horizontal magnitude (vertical comp.)" , REPRESENTATION_HORIZONTAL_MAGNITUDE )
+				.activate( REPRESENTATION_VECTOR_3D );
 	}
 
 
@@ -211,11 +259,14 @@ public class PlotMagneticFieldModel
 
 		double year = this.yearSlider.getValue();
 		double altitudeKilometers = this.altitudeSlider.getValue();
-		if(  year != this.builtYear  ||  altitudeKilometers != this.builtAltitudeKilometers  ) {
+		int representation = selectedValue( this.representationRadio , REPRESENTATION_VECTOR_3D );
+		if(  year != this.builtYear  ||  altitudeKilometers != this.builtAltitudeKilometers
+				||  representation != this.builtRepresentation  ) {
 			this.model.setDecimalYear( year );
-			this.fieldGlyphs = buildFieldGlyphs( altitudeKilometers * 1000.0 );
+			this.fieldGlyphs = buildFieldGlyphs( altitudeKilometers * 1000.0 , representation );
 			this.builtYear = year;
 			this.builtAltitudeKilometers = altitudeKilometers;
+			this.builtRepresentation = representation;
 		}
 
 		applyProjectionAndCamera();
@@ -236,7 +287,7 @@ public class PlotMagneticFieldModel
 			shape( this.fieldGlyphs );
 		}
 
-		drawHeadsUpDisplay( headsUpText( year , altitudeKilometers ) );
+		drawHeadsUpDisplay( headsUpText( year , altitudeKilometers , representation ) );
 	}
 
 
@@ -274,17 +325,32 @@ public class PlotMagneticFieldModel
 
 	/**
 	 * Builds the field-glyph geometry over the grid, evaluating the model at the given altitude.
+	 * <p>
+	 * The glyphs sit on a shell whose radius grows with the altitude, so moving the altitude slider scans visibly through
+	 * altitude shells. Each glyph is a stick capped at its head by a three-sided pyramid, oriented, lengthened, and colored
+	 * according to {@code representation}. The geometry is returned as a group of two children (the sticks as lines and the
+	 * pyramid tips as triangles) so the lines and the filled tips can keep their own rendering styles.
 	 *
 	 * @param altitudeMeters	geometric altitude above the reference sphere. [m]
-	 * @return	shape of colored line glyphs, one per grid point.
+	 * @param representation	{@link #REPRESENTATION_VECTOR_3D}, {@link #REPRESENTATION_HORIZONTAL}, or
+	 *							{@link #REPRESENTATION_HORIZONTAL_MAGNITUDE}.
+	 * @return	group shape holding the glyph geometry.
 	 */
-	private PShape buildFieldGlyphs( double altitudeMeters )
+	private PShape buildFieldGlyphs( double altitudeMeters , int representation )
 	{
 		double radius = WorldMagneticModel.GEOMAGNETIC_REFERENCE_RADIUS + altitudeMeters;
-		PShape shape = createShape();
-		shape.beginShape( LINES );
-		shape.noFill();
-		shape.strokeWeight( 1.5f );
+		// The glyph shell rises with the altitude, so moving the slider scans visibly through altitude shells.
+		float shellRadius = (float) ( GLOBE_RADIUS * radius / WorldMagneticModel.GEOMAGNETIC_REFERENCE_RADIUS ) + GLYPH_LIFT;
+
+		PShape group = createShape( GROUP );
+		PShape sticks = createShape();
+		sticks.beginShape( LINES );
+		sticks.noFill();
+		sticks.strokeWeight( 1.5f );
+		PShape tips = createShape();
+		tips.beginShape( TRIANGLES );
+		tips.noStroke();
+
 		for( double latitude=-GRID_LATITUDE_LIMIT_DEGREES; latitude<=GRID_LATITUDE_LIMIT_DEGREES; latitude+=GRID_STEP_DEGREES ) {
 			double latitudeRad = Math.toRadians( latitude );
 			double cosLatitude = Math.cos( latitudeRad );
@@ -302,37 +368,236 @@ public class PlotMagneticFieldModel
 					continue;
 				}
 
-				// Unit field direction, mapped into the display frame: geo ( x , y , z ) -> display ( y , -z , x ).
-				float unitX = (float) ( field.y() / intensity );
-				float unitY = (float) ( -field.z() / intensity );
-				float unitZ = (float) ( field.x() / intensity );
+				// Outward vertical (up) component of the field.
+				double upComponent = field.x() * geoX + field.y() * geoY + field.z() * geoZ;
 
-				// Glyph center, lifted slightly above the globe surface.
-				float anchorScale = GLOBE_RADIUS + GLYPH_LIFT;
-				float centerX = (float) ( anchorScale * geoY );
-				float centerY = (float) ( -anchorScale * geoZ );
-				float centerZ = (float) ( anchorScale * geoX );
+				// Field direction to draw (geocentric frame), glyph length, and color, depending on the representation.
+				double directionGeoX;
+				double directionGeoY;
+				double directionGeoZ;
+				float glyphLength;
+				int glyphColor;
+				if( representation == REPRESENTATION_HORIZONTAL  ||  representation == REPRESENTATION_HORIZONTAL_MAGNITUDE ) {
+					// Field projected onto the local horizontal (north-east) plane: remove the radial part.
+					double hx = field.x() - upComponent * geoX;
+					double hy = field.y() - upComponent * geoY;
+					double hz = field.z() - upComponent * geoZ;
+					double hmag = Math.sqrt( hx * hx + hy * hy + hz * hz );
+					if( hmag < 1.0e-9 ) {
+						// Field is essentially vertical (near a magnetic pole): no horizontal direction to show.
+						continue;
+					}
+					directionGeoX = hx / hmag;
+					directionGeoY = hy / hmag;
+					directionGeoZ = hz / hmag;
+					glyphLength = ( representation == REPRESENTATION_HORIZONTAL_MAGNITUDE )
+							? (float) ( GLYPH_LENGTH * hmag / HORIZONTAL_INTENSITY_SCALE_NANOTESLA )
+							: GLYPH_LENGTH;
+					glyphColor = verticalComponentColor( upComponent );
+				} else {
+					directionGeoX = field.x() / intensity;
+					directionGeoY = field.y() / intensity;
+					directionGeoZ = field.z() / intensity;
+					glyphLength = GLYPH_LENGTH;
+					glyphColor = intensityColor( (float) intensity );
+				}
 
-				float half = 0.5f * GLYPH_LENGTH;
-				shape.stroke( intensityColor( (float) intensity ) );
-				shape.vertex( centerX - half * unitX , centerY - half * unitY , centerZ - half * unitZ );
-				shape.vertex( centerX + half * unitX , centerY + half * unitY , centerZ + half * unitZ );
+				// Map direction and outward radial into the display frame: geo ( x , y , z ) -> display ( y , -z , x ).
+				float directionX = (float) directionGeoY;
+				float directionY = (float) -directionGeoZ;
+				float directionZ = (float) directionGeoX;
+				float radialX = (float) geoY;
+				float radialY = (float) -geoZ;
+				float radialZ = (float) geoX;
+
+				float centerX = shellRadius * radialX;
+				float centerY = shellRadius * radialY;
+				float centerZ = shellRadius * radialZ;
+
+				float half = 0.5f * glyphLength;
+				float tailX = centerX - half * directionX;
+				float tailY = centerY - half * directionY;
+				float tailZ = centerZ - half * directionZ;
+				float headX = centerX + half * directionX;
+				float headY = centerY + half * directionY;
+				float headZ = centerZ + half * directionZ;
+
+				sticks.stroke( glyphColor );
+				sticks.vertex( tailX , tailY , tailZ );
+				sticks.vertex( headX , headY , headZ );
+
+				addPyramidTip( tips , headX , headY , headZ , directionX , directionY , directionZ ,
+						radialX , radialY , radialZ , glyphLength , glyphColor );
 			}
 		}
-		shape.endShape();
-		return shape;
+
+		sticks.endShape();
+		tips.endShape();
+		group.addChild( sticks );
+		group.addChild( tips );
+		return group;
 	}
 
 
 	/**
-	 * Maps a field intensity to the rainbow color scale.
+	 * Adds a small three-sided pyramid, apex at the glyph head and base behind it, capping the stick to show its direction.
+	 * The base ring lies in the plane perpendicular to the field direction, oriented from the plane spanned by the field
+	 * direction and the outward radial. The three side faces are given slightly different brightness so the pyramid reads
+	 * as a solid shape even though the glyphs are drawn unlit.
 	 *
-	 * @param intensity	field intensity. [nT]
+	 * @param tips			shape collecting the pyramid triangles.
+	 * @param headX			pyramid apex x in the display frame. [world units]
+	 * @param headY			pyramid apex y in the display frame. [world units]
+	 * @param headZ			pyramid apex z in the display frame. [world units]
+	 * @param directionX	unit field direction x in the display frame.
+	 * @param directionY	unit field direction y in the display frame.
+	 * @param directionZ	unit field direction z in the display frame.
+	 * @param radialX		unit outward radial x in the display frame (reference for the base orientation).
+	 * @param radialY		unit outward radial y in the display frame.
+	 * @param radialZ		unit outward radial z in the display frame.
+	 * @param glyphLength	length of the glyph this pyramid caps; the pyramid is sized as a fraction of it. [world units]
+	 * @param glyphColor	base color of the pyramid.
+	 */
+	private void addPyramidTip( PShape tips ,
+			float headX , float headY , float headZ ,
+			float directionX , float directionY , float directionZ ,
+			float radialX , float radialY , float radialZ ,
+			float glyphLength , int glyphColor )
+	{
+		// First base axis: perpendicular to the field, in the plane of the field and the radial.
+		float ux = directionY * radialZ - directionZ * radialY;
+		float uy = directionZ * radialX - directionX * radialZ;
+		float uz = directionX * radialY - directionY * radialX;
+		float un = (float) Math.sqrt( ux * ux + uy * uy + uz * uz );
+		if( un < 1.0e-4f ) {
+			ux = -directionZ;
+			uy = 0.0f;
+			uz = directionX;
+			un = (float) Math.sqrt( ux * ux + uy * uy + uz * uz );
+			if( un < 1.0e-4f ) {
+				ux = 1.0f;
+				uy = 0.0f;
+				uz = 0.0f;
+				un = 1.0f;
+			}
+		}
+		ux /= un;
+		uy /= un;
+		uz /= un;
+		// Second base axis: perpendicular to both ( direction x u ), already unit length.
+		float vx = directionY * uz - directionZ * uy;
+		float vy = directionZ * ux - directionX * uz;
+		float vz = directionX * uy - directionY * ux;
+
+		float height = PYRAMID_HEIGHT_FRACTION * glyphLength;
+		float baseRadius = PYRAMID_RADIUS_FRACTION * glyphLength;
+		float baseCenterX = headX - height * directionX;
+		float baseCenterY = headY - height * directionY;
+		float baseCenterZ = headZ - height * directionZ;
+
+		// Three base vertices at 0, 120, 240 degrees around the base center.
+		float[] cosines = { 1.0f , -0.5f , -0.5f };
+		float[] sines = { 0.0f , 0.8660254f , -0.8660254f };
+		float[] baseX = new float[3];
+		float[] baseY = new float[3];
+		float[] baseZ = new float[3];
+		for( int k=0; k<3; k++ ) {
+			baseX[k] = baseCenterX + baseRadius * ( cosines[k] * ux + sines[k] * vx );
+			baseY[k] = baseCenterY + baseRadius * ( cosines[k] * uy + sines[k] * vy );
+			baseZ[k] = baseCenterZ + baseRadius * ( cosines[k] * uz + sines[k] * vz );
+		}
+
+		// Three side faces, all darker than the full-brightness stick (so it stays visible passing through the pyramid),
+		// each shaded a bit differently so the facets are distinguishable.
+		float[] shades = { 0.6f , 0.45f , 0.32f };
+		for( int k=0; k<3; k++ ) {
+			int next = ( k + 1 ) % 3;
+			tips.fill( shadeColor( glyphColor , shades[k] ) );
+			tips.vertex( headX , headY , headZ );
+			tips.vertex( baseX[k] , baseY[k] , baseZ[k] );
+			tips.vertex( baseX[next] , baseY[next] , baseZ[next] );
+		}
+	}
+
+
+	/**
+	 * Maps a total field intensity to the rainbow color scale.
+	 *
+	 * @param intensity	total field intensity. [nT]
 	 * @return	packed color.
 	 */
 	private int intensityColor( float intensity )
 	{
-		return rainbowColor( ( intensity - INTENSITY_MIN_NANOTESLA ) / ( INTENSITY_MAX_NANOTESLA - INTENSITY_MIN_NANOTESLA ) );
+		float t = ( intensity - INTENSITY_MIN_NANOTESLA ) / ( INTENSITY_MAX_NANOTESLA - INTENSITY_MIN_NANOTESLA );
+		return rainbowColor( t );
+	}
+
+
+	/**
+	 * Maps the vertical (up) component of the field to a diverging color: red where the field points up / out of the
+	 * ground, blue where it points down / into the ground, and pale where it is nearly horizontal.
+	 *
+	 * @param upComponent	outward vertical component of the field. [nT]
+	 * @return	packed color.
+	 */
+	private int verticalComponentColor( double upComponent )
+	{
+		float t = constrain( (float) ( upComponent / VERTICAL_COMPONENT_SCALE_NANOTESLA ) , -1.0f , 1.0f );
+		int paleColor = color( 240 , 240 , 240 );
+		int upColor = color( 255 , 70 , 40 );
+		int downColor = color( 40 , 110 , 255 );
+		if( t >= 0.0f ) {
+			return lerpColor( paleColor , upColor , t );
+		}
+		return lerpColor( paleColor , downColor , -t );
+	}
+
+
+	/**
+	 * Maps a normalized value to a blue-to-red rainbow color.
+	 *
+	 * @param t		value in [0,1] (clamped).
+	 * @return	packed color.
+	 */
+	private int rainbowColor( float t )
+	{
+		t = constrain( t , 0.0f , 1.0f );
+		if( t < 0.25f ) {
+			return color( 0 , map( t , 0.0f , 0.25f , 0 , 255 ) , 255 );
+		} else if( t < 0.5f ) {
+			return color( 0 , 255 , map( t , 0.25f , 0.5f , 255 , 0 ) );
+		} else if( t < 0.75f ) {
+			return color( map( t , 0.5f , 0.75f , 0 , 255 ) , 255 , 0 );
+		} else {
+			return color( 255 , map( t , 0.75f , 1.0f , 255 , 0 ) , 0 );
+		}
+	}
+
+
+	/**
+	 * Scales the brightness of a color by a factor, keeping it opaque.
+	 *
+	 * @param packedColor	color to scale.
+	 * @param factor		brightness factor.
+	 * @return	scaled color.
+	 */
+	private int shadeColor( int packedColor , float factor )
+	{
+		return color( red( packedColor ) * factor , green( packedColor ) * factor , blue( packedColor ) * factor );
+	}
+
+
+	/**
+	 * Returns the value of the active item of a radio button, or a fallback if none is active.
+	 *
+	 * @param radio			radio button to read.
+	 * @param fallbackValue	value to return when no item is active.
+	 * @return	active item value, or the fallback.
+	 */
+	private static int selectedValue( RadioButton radio , int fallbackValue )
+	{
+		float value = radio.getValue();
+		return ( value < 0.0f ) ? fallbackValue : (int) value;
 	}
 
 
@@ -425,18 +690,27 @@ public class PlotMagneticFieldModel
 	 *
 	 * @param year					current decimal year.
 	 * @param altitudeKilometers	current altitude. [km]
+	 * @param representation		active field representation.
 	 * @return	heads-up text.
 	 */
-	private String headsUpText( double year , double altitudeKilometers )
+	private String headsUpText( double year , double altitudeKilometers , int representation )
 	{
 		double[] field = fieldDeclinationInclinationIntensity( this.centerLatitude , this.centerLongitude , altitudeKilometers * 1000.0 );
+		String legend;
+		if( representation == REPRESENTATION_HORIZONTAL ) {
+			legend = "horizontal direction (fixed length); color = vertical component (red up / out, blue down / in)";
+		} else if( representation == REPRESENTATION_HORIZONTAL_MAGNITUDE ) {
+			legend = "horizontal field (length = magnitude); color = vertical component (red up / out, blue down / in)";
+		} else {
+			legend = "3D field direction; color = total intensity (blue low to red high)";
+		}
 		return String.format(
-				"%s  (vectors colored by total intensity)%n" +
+				"%s  (%s)%n" +
 				"drag: rotate   wheel: zoom%n" +
 				"year: %.2f   altitude: %.0f km%n" +
 				"view center: %.1f deg lat , %.1f deg lon%n" +
 				"center field:  declination %.2f deg , inclination %.2f deg , intensity %.0f nT" ,
-				this.model.modelName() ,
+				this.model.modelName() , legend ,
 				year , altitudeKilometers ,
 				this.centerLatitude , wrapLongitude( this.centerLongitude ) ,
 				field[0] , field[1] , field[2] );
@@ -480,27 +754,6 @@ public class PlotMagneticFieldModel
 		double geoY = -sinLatitude * Math.sin( longitudeRad );
 		double geoZ = cosLatitude;
 		return new PVector( (float) geoY , (float) -geoZ , (float) geoX );
-	}
-
-
-	/**
-	 * Maps a normalized value to a blue-to-red rainbow color.
-	 *
-	 * @param t		value in [0,1].
-	 * @return	packed color.
-	 */
-	private int rainbowColor( float t )
-	{
-		t = constrain( t , 0.0f , 1.0f );
-		if( t < 0.25f ) {
-			return color( 0 , map( t , 0.0f , 0.25f , 0 , 255 ) , 255 );
-		} else if( t < 0.5f ) {
-			return color( 0 , 255 , map( t , 0.25f , 0.5f , 255 , 0 ) );
-		} else if( t < 0.75f ) {
-			return color( map( t , 0.5f , 0.75f , 0 , 255 ) , 255 , 0 );
-		} else {
-			return color( 255 , map( t , 0.75f , 1.0f , 255 , 0 ) , 0 );
-		}
 	}
 
 
