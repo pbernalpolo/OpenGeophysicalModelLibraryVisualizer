@@ -91,12 +91,9 @@ public class PlotElevationModel
 	private static final String[] REGION_DIRECTORIES = { "rasters_COP30_murcia" , "rasters_COP30_toulouse" };
 
 	/**
-	 * Base directories searched for the region rasters, relative to the working directory.
+	 * Directory holding the region rasters, relative to the working directory.
 	 */
-	private static final String[] RASTER_BASE_PATHS = {
-			"res/" ,
-			"lib/OpenGeophysicalModelLibrary-java/res/terrain/" ,
-	};
+	private static final String RASTER_DIRECTORY = "res/terrain/";
 
 	/**
 	 * File name of the ESRI ASCII Grid inside each region directory.
@@ -104,12 +101,9 @@ public class PlotElevationModel
 	private static final String RASTER_FILE_NAME = "output_hh.asc";
 
 	/**
-	 * Candidate locations of the EGM2008 {@code .gfc} file, relative to the working directory.
+	 * Location of the EGM2008 {@code .gfc} file, relative to the working directory.
 	 */
-	private static final String[] GFC_CANDIDATE_PATHS = {
-			"res/EGM2008.gfc" ,
-			"lib/OpenGeophysicalModelLibrary-java/res/EGM2008.gfc" ,
-	};
+	private static final String GFC_PATH = "res/gravity/EGM2008.gfc";
 
 
 
@@ -351,12 +345,12 @@ public class PlotElevationModel
 
 		for( int i=0; i<sampledRows; i++ ) {
 			int row = Math.min( i * stride , model.rowCount() - 1 );
-			double latitudeRad = Math.toRadians( model.latitudeOfRow( row ) );
+			double latitudeRad = model.latitudeOfRow( row );
 			double cosLatitude = Math.cos( latitudeRad );
 			double sinLatitude = Math.sin( latitudeRad );
 			for( int j=0; j<sampledColumns; j++ ) {
 				int column = Math.min( j * stride , model.columnCount() - 1 );
-				double longitudeRad = Math.toRadians( model.longitudeOfColumn( column ) );
+				double longitudeRad = model.longitudeOfColumn( column );
 				double geoX = cosLatitude * Math.cos( longitudeRad );
 				double geoY = cosLatitude * Math.sin( longitudeRad );
 				double geoZ = sinLatitude;
@@ -658,13 +652,12 @@ public class PlotElevationModel
 	 */
 	private void loadGeoidModel()
 	{
-		String path = locatePath( GFC_CANDIDATE_PATHS );
-		if( path == null ) {
-			this.geoidLoadError = "EGM2008.gfc not found";
+		if( !Files.exists( Paths.get( GFC_PATH ) ) ) {
+			this.geoidLoadError = "EGM2008.gfc not found at " + GFC_PATH;
 			return;
 		}
 		try {
-			this.geoidModel = Egm2008.fromFilePathAndMaximumDegree( path , EGM_LOAD_DEGREE );
+			this.geoidModel = Egm2008.fromFilePathAndMaximumDegree( GFC_PATH , EGM_LOAD_DEGREE );
 			this.earthRadius = this.geoidModel.referenceRadius();
 		} catch( IOException e ) {
 			this.geoidLoadError = e.getMessage();
@@ -691,20 +684,20 @@ public class PlotElevationModel
 		}
 		this.regionModels[ regionIndex ] = model;
 
-		double west = model.longitudeOfColumn( 0 );
-		double east = model.longitudeOfColumn( model.columnCount() - 1 );
-		double north = model.latitudeOfRow( 0 );
-		double south = model.latitudeOfRow( model.rowCount() - 1 );
-		double centerLat = 0.5 * ( north + south );
-		double centerLon = 0.5 * ( west + east );
-		this.regionCenterLatitude[ regionIndex ] = centerLat;
-		this.regionCenterLongitude[ regionIndex ] = centerLon;
-		this.regionUndulation[ regionIndex ] = geoidUndulationAt( centerLat, centerLon );
+		double westRad = model.longitudeOfColumn( 0 );
+		double eastRad = model.longitudeOfColumn( model.columnCount() - 1 );
+		double northRad = model.latitudeOfRow( 0 );
+		double southRad = model.latitudeOfRow( model.rowCount() - 1 );
+		double centerLatitudeRadians = 0.5 * ( northRad + southRad );
+		double centerLongitudeRadians = 0.5 * ( westRad + eastRad );
+		this.regionCenterLatitude[ regionIndex ] = Math.toDegrees( centerLatitudeRadians );
+		this.regionCenterLongitude[ regionIndex ] = Math.toDegrees( centerLongitudeRadians );
+		this.regionUndulation[ regionIndex ] = geoidUndulationAt( this.regionCenterLatitude[ regionIndex ] , this.regionCenterLongitude[ regionIndex ] );
 
 		// Frame the region: its larger angular span as a globe arc, backed off to fit the field of view.
-		double cosLat = Math.cos( Math.toRadians( centerLat ) );
-		double spanLatRad = Math.toRadians( north - south );
-		double spanLonRad = Math.toRadians( ( east - west ) * cosLat );
+		double cosLat = Math.cos( centerLatitudeRadians );
+		double spanLatRad = northRad - southRad;
+		double spanLonRad = ( eastRad - westRad ) * cosLat;
 		float displaySpan = (float) ( GLOBE_RADIUS * Math.max( spanLatRad , spanLonRad ) );
 		float frameAltitude = 1.6f * ( displaySpan * 0.5f ) / (float) Math.tan( radians( CAMERA_FOV_DEGREES * 0.5f ) );
 		this.regionFrameAltitude[ regionIndex ] = Math.max( frameAltitude , GLOBE_RADIUS * 0.0008f );
@@ -742,30 +735,8 @@ public class PlotElevationModel
 	 */
 	private static String locateRegionPath( int regionIndex )
 	{
-		for( String basePath : RASTER_BASE_PATHS ) {
-			String candidatePath = basePath + REGION_DIRECTORIES[ regionIndex ] + "/" + RASTER_FILE_NAME;
-			if( Files.exists( Paths.get( candidatePath ) ) ) {
-				return candidatePath;
-			}
-		}
-		return null;
-	}
-
-
-	/**
-	 * Returns the first existing path among the candidates, or {@code null} if none exist.
-	 *
-	 * @param candidatePaths	candidate paths.
-	 * @return	first existing path, or {@code null}.
-	 */
-	private static String locatePath( String[] candidatePaths )
-	{
-		for( String candidatePath : candidatePaths ) {
-			if( Files.exists( Paths.get( candidatePath ) ) ) {
-				return candidatePath;
-			}
-		}
-		return null;
+		String path = RASTER_DIRECTORY + REGION_DIRECTORIES[ regionIndex ] + "/" + RASTER_FILE_NAME;
+		return Files.exists( Paths.get( path ) ) ? path : null;
 	}
 
 }

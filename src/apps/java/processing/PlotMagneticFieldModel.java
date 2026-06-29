@@ -124,12 +124,9 @@ public class PlotMagneticFieldModel
 	private static final float MAX_ALTITUDE_KILOMETERS = 2000.0f;
 
 	/**
-	 * Candidate locations of the WMM {@code .COF} file, relative to the working directory.
+	 * Location of the WMM {@code .COF} file, relative to the working directory.
 	 */
-	private static final String[] COF_CANDIDATE_PATHS = {
-			"res/WMM2025COF/WMM.COF",
-			"lib/OpenGeophysicalModelLibrary-java/res/WMM2025COF/WMM.COF",
-	};
+	private static final String COF_PATH = "res/magnetic/WMM2025COF/WMM.COF";
 
 
 
@@ -796,33 +793,16 @@ public class PlotMagneticFieldModel
 	 */
 	private void loadModel()
 	{
-		String path = locateCofPath();
-		if( path == null ) {
-			this.loadError = "WMM.COF not found in " + String.join( " or " , COF_CANDIDATE_PATHS );
+		if( !Files.exists( Paths.get( COF_PATH ) ) ) {
+			this.loadError = "WMM.COF not found at " + COF_PATH;
 			return;
 		}
 		try {
-			this.model = WorldMagneticModel.fromFilePath( path );
+			this.model = WorldMagneticModel.fromFilePath( COF_PATH );
 			this.modelLoaded = true;
 		} catch( IOException e ) {
 			this.loadError = "Could not load WMM.COF: " + e.getMessage();
 		}
-	}
-
-
-	/**
-	 * Returns the path to the WMM {@code .COF} file, or {@code null} if it cannot be found.
-	 *
-	 * @return	path to the {@code .COF} file, or {@code null}.
-	 */
-	private static String locateCofPath()
-	{
-		for( String candidatePath : COF_CANDIDATE_PATHS ) {
-			if( Files.exists( Paths.get( candidatePath ) ) ) {
-				return candidatePath;
-			}
-		}
-		return null;
 	}
 
 }

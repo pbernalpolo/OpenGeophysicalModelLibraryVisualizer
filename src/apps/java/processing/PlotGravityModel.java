@@ -131,12 +131,9 @@ public class PlotGravityModel
 	private static final float MOUSE_LIGHT_DEPTH = 0.1f;
 
 	/**
-	 * Candidate locations of the EGM2008 {@code .gfc} file, relative to the working directory.
+	 * Location of the EGM2008 {@code .gfc} file, relative to the working directory.
 	 */
-	private static final String[] GFC_CANDIDATE_PATHS = {
-			"res/EGM2008.gfc",
-			"lib/OpenGeophysicalModelLibrary-java/res/EGM2008.gfc",
-	};
+	private static final String GFC_PATH = "res/gravity/EGM2008.gfc";
 
 
 
@@ -1140,13 +1137,12 @@ public class PlotGravityModel
 	 */
 	private void loadModel()
 	{
-		String path = locateGfcPath();
-		if( path == null ) {
-			this.loadError = "EGM2008.gfc not found in " + String.join( " or " , GFC_CANDIDATE_PATHS );
+		if( !Files.exists( Paths.get( GFC_PATH ) ) ) {
+			this.loadError = "EGM2008.gfc not found at " + GFC_PATH;
 			return;
 		}
 		try {
-			this.model = Egm2008.fromFilePathAndMaximumDegree( path , LOAD_DEGREE );
+			this.model = Egm2008.fromFilePathAndMaximumDegree( GFC_PATH , LOAD_DEGREE );
 		} catch( IOException e ) {
 			this.loadError = "Could not load EGM2008.gfc: " + e.getMessage();
 			return;
@@ -1163,22 +1159,6 @@ public class PlotGravityModel
 
 		this.ellipsoidZonal = referenceEllipsoidZonalCoefficients();
 		this.modelLoaded = true;
-	}
-
-
-	/**
-	 * Returns the path to the EGM2008 {@code .gfc} file, or {@code null} if it cannot be found.
-	 *
-	 * @return	path to the EGM2008 {@code .gfc} file, or {@code null} if it cannot be found.
-	 */
-	private static String locateGfcPath()
-	{
-		for( String candidatePath : GFC_CANDIDATE_PATHS ) {
-			if( Files.exists( Paths.get( candidatePath ) ) ) {
-				return candidatePath;
-			}
-		}
-		return null;
 	}
 
 
