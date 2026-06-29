@@ -1,0 +1,2 @@
+res/gravity/EGM2008.gfc filter=lfs diff=lfs merge=lfs -text
+*.gfc filter=lfs diff=lfs merge=lfs -text
