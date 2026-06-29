@@ -297,9 +297,12 @@ public class PlotMagneticFieldModel
 		if( this.controls.isMouseOver() ) {
 			return;
 		}
-		double sensitivity = 0.25 * ( this.cameraAltitude + GLOBE_RADIUS ) / ( 2.0 * GLOBE_RADIUS );
-		this.centerLatitude += ( mouseY - pmouseY ) * sensitivity;
-		this.centerLongitude -= ( mouseX - pmouseX ) * sensitivity / Math.max( Math.cos( Math.toRadians( this.centerLatitude ) ) , 0.1 );
+		// Screen-space drag: one pixel maps to the surface arc one pixel covers at the current zoom, so the point under
+		// the cursor stays under it whether the whole globe or a small patch fills the view.
+		double worldPerPixel = 2.0 * this.cameraAltitude * Math.tan( radians( CAMERA_FOV_DEGREES * 0.5f ) ) / this.height;
+		double degreesPerPixel = Math.min( Math.toDegrees( worldPerPixel / GLOBE_RADIUS ) , 0.5 );
+		this.centerLatitude += ( mouseY - pmouseY ) * degreesPerPixel;
+		this.centerLongitude -= ( mouseX - pmouseX ) * degreesPerPixel / Math.max( Math.cos( Math.toRadians( this.centerLatitude ) ) , 0.1 );
 		this.centerLatitude = Math.max( -89.0 , Math.min( 89.0 , this.centerLatitude ) );
 	}
 
