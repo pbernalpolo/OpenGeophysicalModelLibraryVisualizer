@@ -8,8 +8,7 @@ import java.nio.file.Paths;
 import controlP5.ControlP5;
 import controlP5.RadioButton;
 import controlP5.Slider;
-
-import geophysicalModelLibrary.magneticModels.WorldMagneticModel;
+import geophysicalModelLibrary.magnetic.WorldMagneticModel;
 import numericalLibrary.types.Vector3;
 import utils.Coastlines;
 
