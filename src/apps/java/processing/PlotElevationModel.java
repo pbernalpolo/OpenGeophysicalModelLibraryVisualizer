@@ -2,8 +2,13 @@ package processing;
 
 
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 import controlP5.ControlP5;
 import controlP5.RadioButton;
@@ -81,19 +86,15 @@ public class PlotElevationModel
 	private static final float MAX_VERTICAL_EXAGGERATION = 100.0f;
 
 	/**
-	 * Names of the selectable regions, in radio-button order.
-	 */
-	private static final String[] REGION_NAMES = { "Murcia" , "Toulouse" };
-
-	/**
-	 * Raster sub-directory of each region, in the same order as {@link #REGION_NAMES}.
-	 */
-	private static final String[] REGION_DIRECTORIES = { "rasters_COP30_murcia" , "rasters_COP30_toulouse" };
-
-	/**
-	 * Directory holding the region rasters, relative to the working directory.
+	 * Directory holding the region rasters, relative to the working directory. Every sub-directory that contains a
+	 * {@link #RASTER_FILE_NAME} is discovered automatically at startup, so new tiles appear without code changes.
 	 */
 	private static final String RASTER_DIRECTORY = "res/terrain/";
+
+	/**
+	 * Prefix stripped from a raster sub-directory name to build the region's display label.
+	 */
+	private static final String REGION_DIRECTORY_PREFIX = "rasters_COP30_";
 
 	/**
 	 * File name of the ESRI ASCII Grid inside each region directory.
@@ -122,24 +123,30 @@ public class PlotElevationModel
 	private double earthRadius = FALLBACK_EARTH_RADIUS;
 
 	/**
+	 * Regions discovered under {@link #RASTER_DIRECTORY}: display names and raster sub-directory names, in radio order.
+	 */
+	private String[] regionNames = new String[0];
+	private String[] regionDirectories = new String[0];
+
+	/**
 	 * Loaded elevation model of each region (null if it failed to load).
 	 */
-	private final EsriAsciiGridElevationModel[] regionModels = new EsriAsciiGridElevationModel[ REGION_NAMES.length ];
+	private EsriAsciiGridElevationModel[] regionModels = new EsriAsciiGridElevationModel[0];
 
 	/**
 	 * Geographic center, geoid undulation, framing camera altitude, and elevation range of each region.
 	 */
-	private final double[] regionCenterLatitude = new double[ REGION_NAMES.length ];
-	private final double[] regionCenterLongitude = new double[ REGION_NAMES.length ];
-	private final double[] regionUndulation = new double[ REGION_NAMES.length ];
-	private final float[] regionFrameAltitude = new float[ REGION_NAMES.length ];
-	private final float[] regionMinElevation = new float[ REGION_NAMES.length ];
-	private final float[] regionMaxElevation = new float[ REGION_NAMES.length ];
+	private double[] regionCenterLatitude = new double[0];
+	private double[] regionCenterLongitude = new double[0];
+	private double[] regionUndulation = new double[0];
+	private float[] regionFrameAltitude = new float[0];
+	private float[] regionMinElevation = new float[0];
+	private float[] regionMaxElevation = new float[0];
 
 	/**
 	 * Retained terrain mesh of each region, rebuilt when the exaggeration changes.
 	 */
-	private final PShape[] regionMeshes = new PShape[ REGION_NAMES.length ];
+	private PShape[] regionMeshes = new PShape[0];
 
 	/**
 	 * Coastline line strips at the globe surface.
@@ -209,7 +216,8 @@ public class PlotElevationModel
 	{
 		textSize( 13 );
 		loadGeoidModel();
-		for( int i=0; i<REGION_NAMES.length; i++ ) {
+		discoverRegions();
+		for( int i=0; i<this.regionNames.length; i++ ) {
 			loadRegion( i );
 		}
 		this.coastlines = Coastlines.loadNaturalEarth110m( GLOBE_RADIUS + COASTLINE_SURFACE_OFFSET );
@@ -218,10 +226,12 @@ public class PlotElevationModel
 		this.controls.setAutoDraw( false );
 		this.regionRadio = this.controls.addRadioButton( "fly to region" )
 				.setPosition( this.width - 160 , 24 ).setSize( 14 , 14 ).setSpacingRow( 6 );
-		for( int i=0; i<REGION_NAMES.length; i++ ) {
-			this.regionRadio.addItem( REGION_NAMES[i] , i );
+		for( int i=0; i<this.regionNames.length; i++ ) {
+			this.regionRadio.addItem( this.regionNames[i] , i );
 		}
-		this.regionRadio.activate( 0 );
+		if( this.regionNames.length > 0 ) {
+			this.regionRadio.activate( 0 );
+		}
 		this.exaggerationSlider = this.controls.addSlider( "vertical exaggeration" )
 				.setPosition( 20 , this.height - 32 ).setSize( 320 , 18 )
 				.setRange( 1.0f , MAX_VERTICAL_EXAGGERATION ).setValue( DEFAULT_VERTICAL_EXAGGERATION );
@@ -232,15 +242,15 @@ public class PlotElevationModel
 	{
 		background( 8 );
 
-		int region = selectedValue( this.regionRadio , 0 );
-		if( region != this.selectedRegion ) {
+		int region = selectedValue( this.regionRadio , -1 );
+		if( region >= 0 && region != this.selectedRegion ) {
 			flyToRegion( region );
 			this.selectedRegion = region;
 		}
 
 		double exaggeration = this.exaggerationSlider.getValue();
 		if( exaggeration != this.builtExaggeration ) {
-			for( int i=0; i<REGION_NAMES.length; i++ ) {
+			for( int i=0; i<this.regionMeshes.length; i++ ) {
 				this.regionMeshes[i] = buildRegionMesh( i , (float) exaggeration );
 			}
 			this.builtExaggeration = exaggeration;
@@ -314,7 +324,7 @@ public class PlotElevationModel
 	 * normals (from the neighbor positions) give the directional light something to shade, and each vertex is tinted by
 	 * its elevation.
 	 *
-	 * @param regionIndex	index into {@link #REGION_NAMES}.
+	 * @param regionIndex	index of the discovered region.
 	 * @param exaggeration	radial relief exaggeration factor.
 	 * @return	terrain mesh shape, or {@code null} if the region failed to load.
 	 */
@@ -513,11 +523,11 @@ public class PlotElevationModel
 	/**
 	 * Points the camera at a region's center and zooms in to frame it.
 	 *
-	 * @param regionIndex	index into {@link #REGION_NAMES}.
+	 * @param regionIndex	index of the discovered region.
 	 */
 	private void flyToRegion( int regionIndex )
 	{
-		if( this.regionModels[ regionIndex ] == null ) {
+		if( regionIndex < 0 || regionIndex >= this.regionModels.length || this.regionModels[ regionIndex ] == null ) {
 			return;
 		}
 		this.centerLatitude = this.regionCenterLatitude[ regionIndex ];
@@ -554,21 +564,33 @@ public class PlotElevationModel
 	 */
 	private String headsUpText( int region , double exaggeration )
 	{
-		if( this.regionModels[ region ] == null ) {
-			return REGION_NAMES[ region ] + ": raster not found.";
+		StringBuilder text = new StringBuilder();
+		if( this.geoidLoadError != null ) {
+			text.append( "WARNING: " ).append( this.geoidLoadError ).append( " - continuing with geoid undulation N = 0\n" );
 		}
-		String warning = ( this.geoidLoadError != null )
-				? "WARNING: " + this.geoidLoadError + " - continuing with geoid undulation N = 0\n"
-				: "";
-		return warning + String.format(
-				"%s  (Copernicus GLO-30 DSM on the globe; hypsometric tint)%n" +
-				"drag: rotate   wheel: zoom%n" +
-				"geoid undulation N: %.1f m   elevation: %.0f to %.0f m%n" +
-				"radial exaggeration: %.0fx" ,
-				REGION_NAMES[ region ] ,
-				this.regionUndulation[ region ] ,
-				this.regionMinElevation[ region ] , this.regionMaxElevation[ region ] ,
-				exaggeration );
+		text.append( "Copernicus GLO-30 DSM on the globe; hypsometric tint\n" );
+		text.append( "drag: rotate   wheel: zoom\n" );
+		text.append( String.format( "view center: %.4f deg lat , %.4f deg lon%n",
+				this.centerLatitude, wrapLongitude( this.centerLongitude ) ) );
+		if( region >= 0 && region < this.regionNames.length && this.regionModels[ region ] != null ) {
+			text.append( String.format( "region: %s   geoid N: %.1f m   elevation: %.0f to %.0f m%n",
+					this.regionNames[ region ], this.regionUndulation[ region ],
+					this.regionMinElevation[ region ], this.regionMaxElevation[ region ] ) );
+		}
+		text.append( String.format( "radial exaggeration: %.0fx", exaggeration ) );
+		return text.toString();
+	}
+
+
+	/**
+	 * Wraps a longitude into the interval [-180, 180] for display.
+	 *
+	 * @param longitudeDegrees	longitude. [deg]
+	 * @return	wrapped longitude. [deg]
+	 */
+	private static double wrapLongitude( double longitudeDegrees )
+	{
+		return ( ( longitudeDegrees + 180.0 ) % 360.0 + 360.0 ) % 360.0 - 180.0;
 	}
 
 
@@ -648,6 +670,59 @@ public class PlotElevationModel
 	////////////////////////////////////////////////////////////////
 
 	/**
+	 * Discovers the region tiles under {@link #RASTER_DIRECTORY} (every sub-directory that contains a raster), sorted by
+	 * name, and sizes the per-region arrays accordingly. New tiles are picked up automatically on the next run.
+	 */
+	private void discoverRegions()
+	{
+		List<String> directories = new ArrayList<>();
+		Path root = Paths.get( RASTER_DIRECTORY );
+		if( Files.isDirectory( root ) ) {
+			try( DirectoryStream<Path> entries = Files.newDirectoryStream( root ) ) {
+				for( Path entry : entries ) {
+					if( Files.isDirectory( entry )  &&  Files.exists( entry.resolve( RASTER_FILE_NAME ) ) ) {
+						directories.add( entry.getFileName().toString() );
+					}
+				}
+			} catch( IOException e ) {
+				// Leave the region list empty; the globe still renders.
+			}
+		}
+		Collections.sort( directories );
+
+		int n = directories.size();
+		this.regionDirectories = directories.toArray( new String[0] );
+		this.regionNames = new String[n];
+		for( int i=0; i<n; i++ ) {
+			this.regionNames[i] = displayName( directories.get( i ) );
+		}
+		this.regionModels = new EsriAsciiGridElevationModel[n];
+		this.regionCenterLatitude = new double[n];
+		this.regionCenterLongitude = new double[n];
+		this.regionUndulation = new double[n];
+		this.regionFrameAltitude = new float[n];
+		this.regionMinElevation = new float[n];
+		this.regionMaxElevation = new float[n];
+		this.regionMeshes = new PShape[n];
+	}
+
+
+	/**
+	 * Turns a raster sub-directory name into a display label: strips {@link #REGION_DIRECTORY_PREFIX} and capitalizes.
+	 *
+	 * @param directoryName	raster sub-directory name.
+	 * @return	display label.
+	 */
+	private static String displayName( String directoryName )
+	{
+		String label = directoryName.startsWith( REGION_DIRECTORY_PREFIX )
+				? directoryName.substring( REGION_DIRECTORY_PREFIX.length() )
+				: directoryName;
+		return label.isEmpty() ? directoryName : Character.toUpperCase( label.charAt( 0 ) ) + label.substring( 1 );
+	}
+
+
+	/**
 	 * Loads EGM2008 for the geoid undulation, recording an error and falling back to a spherical Earth if it is missing.
 	 */
 	private void loadGeoidModel()
@@ -668,7 +743,7 @@ public class PlotElevationModel
 	/**
 	 * Loads a region's raster and computes its center, geoid undulation, framing altitude, leaving its model null on error.
 	 *
-	 * @param regionIndex	index into {@link #REGION_NAMES}.
+	 * @param regionIndex	index of the discovered region.
 	 */
 	private void loadRegion( int regionIndex )
 	{
@@ -728,14 +803,14 @@ public class PlotElevationModel
 
 
 	/**
-	 * Returns the path to a region's raster, searching the candidate base directories, or {@code null} if not found.
+	 * Returns the path to a discovered region's raster, or {@code null} if it does not exist.
 	 *
-	 * @param regionIndex	index into {@link #REGION_DIRECTORIES}.
+	 * @param regionIndex	index of the discovered region.
 	 * @return	path to the {@code .asc} file, or {@code null}.
 	 */
-	private static String locateRegionPath( int regionIndex )
+	private String locateRegionPath( int regionIndex )
 	{
-		String path = RASTER_DIRECTORY + REGION_DIRECTORIES[ regionIndex ] + "/" + RASTER_FILE_NAME;
+		String path = RASTER_DIRECTORY + this.regionDirectories[ regionIndex ] + "/" + RASTER_FILE_NAME;
 		return Files.exists( Paths.get( path ) ) ? path : null;
 	}
 
