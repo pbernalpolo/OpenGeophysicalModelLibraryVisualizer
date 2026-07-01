@@ -1,0 +1,42 @@
+{
+	"version": "0.2.0",
+	"comment": [
+		"Processing's JOGL native libraries (.so/.dylib/.dll) live in core/library/<platform>/ and are NOT inside the",
+		"jars. They must be on java.library.path. Eclipse adds this via the .classpath native-library attribute; VS Code",
+		"does not, so each Processing launch sets it here. The path below is for linux-amd64 (x86_64); change the folder",
+		"to match your platform: linux-aarch64, macos-x86_64, macos-aarch64, windows-amd64, ..."
+	],
+	"configurations": [
+		{
+			"type": "java",
+			"name": "PlotMagneticFieldModel",
+			"request": "launch",
+			"mainClass": "processing.PlotMagneticFieldModel",
+			"cwd": "${workspaceFolder}",
+			"vmArgs": "-Djava.library.path=${workspaceFolder}/lib/processing-4.3-linux-arm64/processing-4.3/core/library/linux-amd64"
+		},
+		{
+			"type": "java",
+			"name": "PlotGravityModel",
+			"request": "launch",
+			"mainClass": "processing.PlotGravityModel",
+			"cwd": "${workspaceFolder}",
+			"vmArgs": "-Djava.library.path=${workspaceFolder}/lib/processing-4.3-linux-arm64/processing-4.3/core/library/linux-amd64"
+		},
+		{
+			"type": "java",
+			"name": "PlotElevationModel",
+			"request": "launch",
+			"mainClass": "processing.PlotElevationModel",
+			"cwd": "${workspaceFolder}",
+			"vmArgs": "-Djava.library.path=${workspaceFolder}/lib/processing-4.3-linux-arm64/processing-4.3/core/library/linux-amd64"
+		},
+		{
+			"type": "java",
+			"name": "SensorModelCheck",
+			"request": "launch",
+			"mainClass": "tests.SensorModelCheck",
+			"cwd": "${workspaceFolder}"
+		}
+	]
+}
