@@ -57,7 +57,7 @@ public class PlotGravityModel
 	/**
 	 * Number of grid points evaluated along latitude and along longitude. This count is fixed; the coordinates change with the view.
 	 */
-	private static final int GRID_N = 128;
+	private static final int GRID_N = 256;
 
 	/**
 	 * Radius of the globe in world units.
