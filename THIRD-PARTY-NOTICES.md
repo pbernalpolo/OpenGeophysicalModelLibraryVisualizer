@@ -43,6 +43,11 @@ See [`res/README.md`](res/README.md) for full details. Summary of terms:
 - Terms: publicly released and free to use.
 - Source / distribution: ICGEM, <https://icgem.gfz-potsdam.de/>.
 
+### EGM96 — `res/gravity/EGM96.gfc`
+- Producer: NASA Goddard Space Flight Center and NIMA (Lemoine et al., 1998).
+- Terms: publicly released and free to use.
+- Source / distribution: ICGEM, <https://icgem.gfz-potsdam.de/>.
+
 ### Copernicus GLO-30 DEM — `res/terrain/rasters_COP30_*/`
 - Producer: Copernicus DEM, derived from TanDEM-X; provided under COPERNICUS by the European Union and ESA.
 - Terms: free to use **with attribution**. Downloaded via OpenTopography.

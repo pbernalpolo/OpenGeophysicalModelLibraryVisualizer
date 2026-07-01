@@ -11,6 +11,7 @@ Data is organized **by the package that loads it**, in a folder named after that
 res/
   magnetic/WMM2025COF/        loaded by geophysicalModelLibrary.magnetic  (WMM)
   gravity/EGM2008.gfc         loaded by geophysicalModelLibrary.gravity   (EGM2008)
+  gravity/EGM96.gfc           loaded by geophysicalModelLibrary.gravity   (EGM96)
   terrain/rasters_COP30_*/    loaded by geophysicalModelLibrary.terrain   (Copernicus DEM)
   ne_110m_coastline.geojson   loaded by utils.Coastlines (a general visualizer asset, not package data)
 ```
@@ -39,6 +40,12 @@ So if you add data, mirror this `res/<package>/…` structure and run from the r
 - **Format:** ICGEM `.gfc` spherical-harmonic coefficients — <https://icgem.gfz-potsdam.de/>.
 - **Large (~240 MB).** It is committed here for convenience; expect a heavy clone. In a standalone library checkout it
   is normally left untracked and the tests skip when it is missing.
+
+### `gravity/EGM96.gfc` — Earth Gravitational Model 1996
+- **Used by:** `Egm96` (degree/order 360). It is the older geoid that many GPS receivers still use to report height
+  above mean sea level, so it is handy when reconciling GPS altitudes with a model geoid; `Egm96Test` validates it.
+- **Format:** ICGEM `.gfc` spherical-harmonic coefficients (~5.6 MB) — <https://icgem.gfz-potsdam.de/>.
+- **Producer:** NASA GSFC and NIMA (Lemoine et al., 1998, NASA/TP-1998-206861).
 
 ### `terrain/rasters_COP30_<region>/` — Copernicus GLO-30 elevation
 - **Used by:** `PlotElevationModel` (regions: `murcia`, `toulouse`).
